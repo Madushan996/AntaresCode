@@ -213,6 +213,79 @@ to tool_append(a) {
     give "Added {n} lines to {rel(p)}; it now has {total} lines."
 }
 
+# The spaces at the start of a line.
+to leading_space(s) {
+    t = trim(s)
+    when t == "" { give s }
+    give slice(s, 0, find(s, t))
+}
+
+# When old_string isn't in the file exactly, models have usually got the
+# indentation wrong (copying from read_file, say, with two spaces too many).
+# This looks for it line by line, ignoring the spaces at the start and end of
+# each line. If it is in exactly one place, it gives the file's own text for
+# it, and new_string re-indented the same way: each indentation the model
+# used in old_string becomes the one the file has there, and lines indented
+# some other way are left as they are. {count} says how many places matched.
+to loose_match(content, old, new) {
+    eol = "\n"
+    when has(content, CR + "\n") { eol = CR + "\n" }
+    o = replace(old, CR, "")
+    w = replace(new, CR, "")
+    when ends(o, "\n") and ends(w, "\n") {
+        o = slice(o, 0, len(o) - 1)
+        w = slice(w, 0, len(w) - 1)
+    }
+    olds = split(o, "\n")
+    when len(filter(olds, l => trim(l) != "")) == 0 { give {count: 0} }
+    flines = split(replace(content, CR, ""), "\n")
+    when len(olds) > len(flines) { give {count: 0} }
+    trimmed = map(flines, l => trim(l))
+    wanted = map(olds, l => trim(l))
+    hits = 0
+    at = -1
+    each i in range(len(flines) - len(olds) + 1) {
+        when trimmed[i] == wanted[0] {
+            same = yes
+            j = 1
+            while same and j < len(olds) {
+                when trimmed[i + j] != wanted[j] { same = no }
+                j += 1
+            }
+            when same {
+                hits += 1
+                when at < 0 { at = i }
+            }
+        }
+    }
+    when hits != 1 { give {count: hits} }
+    froms = []
+    tos = []
+    each j in range(len(olds)) {
+        when wanted[j] != "" {
+            f = leading_space(olds[j])
+            when not has(froms, f) {
+                froms = push(froms, f)
+                tos = push(tos, leading_space(flines[at + j]))
+            }
+        }
+    }
+    fixed = []
+    each l in split(w, "\n") {
+        out = l
+        when trim(l) != "" {
+            f = leading_space(l)
+            each k in range(len(froms)) {
+                when froms[k] == f { out = tos[k] + slice(l, len(f)) }
+            }
+        }
+        fixed = push(fixed, out)
+    }
+    exact = join(slice(flines, at, at + len(olds)), eol)
+    when count_of(content, exact) != 1 { give {count: 0} }
+    give {count: 1, old: exact, new: join(fixed, eol)}
+}
+
 to tool_edit(a) {
     p = full_path(a.path)
     old = text(a.old_string)
@@ -228,7 +301,16 @@ to tool_edit(a) {
     }
     when old == "" { fail("old_string is empty; use write_file to create a file") }
     found = count_of(content, old)
-    when found == 0 { fail("old_string was not found in {rel(p)}. Read the file again and copy the text exactly, including spaces and indentation.") }
+    loose = no
+    when found == 0 {
+        m = loose_match(content, old, new)
+        when m.count > 1 { fail("old_string was not found exactly in {rel(p)}, and appears {m.count} times when indentation is ignored. Read the file again and copy the text exactly, with more surrounding lines.") }
+        when m.count == 0 { fail("old_string was not found in {rel(p)}. Read the file again and copy the text exactly, including spaces and indentation.") }
+        old = m.old
+        new = m.new
+        found = 1
+        loose = yes
+    }
     when found > 1 and not every { fail("old_string appears {found} times in {rel(p)}. Include more surrounding lines to make it unique, or set replace_all.") }
     show_diff(replace(old, CR, ""), replace(new, CR, ""), 12)
     ok = permitted("edit", "edit", "edit files")
@@ -243,6 +325,10 @@ to tool_edit(a) {
     write(p, updated)
     gone = len(lines(old))
     added = len(lines(new))
+    when loose {
+        result_line(green("Updated {rel(p)}") + dim(" ({gone} lines out, {added} in; indentation matched to the file)"))
+        give "Updated {rel(p)}. Note: old_string's indentation didn't match the file, so the edit was matched ignoring indentation and new_string was re-indented to fit. Check the indentation with read_file if it matters."
+    }
     result_line(green("Updated {rel(p)}") + dim(" ({found} place(s): {gone} lines out, {added} in)"))
     give "Updated {rel(p)} ({found} replacement(s))."
 }
@@ -474,6 +560,7 @@ to tool_multi_edit(a) {
     crlf = has(content, CR + "\n")
     updated = content
     n = 0
+    loosened = 0
     each e in edits {
         n += 1
         old = text(arg(e, "old_string", ""))
@@ -484,7 +571,14 @@ to tool_multi_edit(a) {
         }
         when old == "" { fail("edit {n}: old_string is empty") }
         found = count_of(updated, old)
-        when found == 0 { fail("edit {n}: old_string was not found (after the edits before it). Nothing was changed. Read the file again and copy the text exactly.") }
+        when found == 0 {
+            m = loose_match(updated, old, new)
+            when m.count != 1 { fail("edit {n}: old_string was not found (after the edits before it). Nothing was changed. Read the file again and copy the text exactly.") }
+            old = m.old
+            new = m.new
+            found = 1
+            loosened += 1
+        }
         every = arg(e, "replace_all", no)
         when found > 1 and not every { fail("edit {n}: old_string appears {found} times. Nothing was changed. Include more surrounding lines, or set replace_all.") }
         show_diff(replace(old, CR, ""), replace(new, CR, ""), 4)
@@ -499,6 +593,10 @@ to tool_multi_edit(a) {
     when not ok.ok { give refused(ok) }
     snapshot(p)
     write(p, updated)
+    when loosened > 0 {
+        result_line(green("Updated {rel(p)}") + dim(" ({len(edits)} changes; indentation matched to the file in {loosened})"))
+        give "Updated {rel(p)} with {len(edits)} changes. Note: in {loosened} of them old_string's indentation didn't match the file, so they were matched ignoring indentation and re-indented to fit."
+    }
     result_line(green("Updated {rel(p)}") + dim(" ({len(edits)} changes)"))
     give "Updated {rel(p)} with {len(edits)} changes."
 }
