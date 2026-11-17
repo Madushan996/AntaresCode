@@ -136,8 +136,17 @@ make_folder(WORK)
 make_folder(DIST)
 make_guide()
 make_ico([256, 64, 48, 32, 16], HERE + "/acode.ico")
-exe = DIST + "/acode.exe"
-r = shell("antares build \"" + native(HERE + "/antares_code.ant") + "\" \"" + native(exe) + "\" --pack --icon \"" + native(HERE + "/acode.ico") + "\"", {timeout: 300})
+# Built in build/ first: while dist/acode.exe is running, Windows won't let
+# it be replaced, and the old one must never pass for the new one.
+fresh = WORK + "/acode.exe"
+when exists(fresh) { delete(fresh) }
+r = shell("antares build \"" + native(HERE + "/antares_code.ant") + "\" \"" + native(fresh) + "\" --pack --icon \"" + native(HERE + "/acode.ico") + "\"", {timeout: 300})
 show trim(r.output + "\n" + r.errors)
-when not exists(exe) { fail("the build didn't make " + exe) }
+when r.code != 0 or not exists(fresh) { fail("the build didn't work (see above)") }
+exe = DIST + "/acode.exe"
+c = shell("copy /y \"" + native(fresh) + "\" \"" + native(exe) + "\"")
+when c.code != 0 {
+    show "Built " + native(fresh) + " ({floor(file_size(fresh) / 1024)} KB), but couldn't copy it into dist: is acode.exe from dist running? Close it and build again, or use the one in build."
+    fail("dist/acode.exe is still the old one")
+}
 show "Done: {native(exe)} ({floor(file_size(exe) / 1024)} KB)"
