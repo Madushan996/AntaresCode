@@ -594,7 +594,7 @@ to banner() {
     when len(custom) > 0 { rows = push(rows, [[pad("own", 8), "dim"], [join(map(custom, c => "/" + c.name), " "), ""]]) }
     show ""
     draw_box(rows)
-    show dim("  /help for commands · /model to switch models · /undo to take back changes · Ctrl+C to quit")
+    show dim("  /help for commands · /model to switch models · /undo to take back changes · Esc stops it · Ctrl+C quits")
     show ""
 }
 

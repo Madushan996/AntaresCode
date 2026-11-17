@@ -236,8 +236,31 @@ to inputs_of(call) {
 
 # One turn: the user's message, then as many model replies and tool calls
 # as it takes. Gives yes if it finished normally.
+# How many times x is in a list.
+to times_in(xs, x) = len(filter(xs, y => y == x))
+
+# Said when the work is stopped part-way, by Esc or by the loop guard.
+to stopped_note(steps, before) {
+    when steps == 1 {
+        change MESSAGES = slice(MESSAGES, 0, before)
+        show dim("  Your message wasn't kept: send it again, or something else.")
+    } else {
+        save_session()
+        show dim("  The work so far is kept: tell it what to do next, or say \"continue\".")
+    }
+}
+
+# Fails in a row, without a change that worked, before the turn is stopped.
+LOOP_LIMIT = 8
+
 to agent_turn(user_text) {
     change TURN = TURN + 1
+    # an Esc pressed before now doesn't count
+    esc_pressed()
+    failed_calls = []
+    # read-only calls since the last change that worked
+    looks = []
+    fails = 0
     when conversation_tokens() > SETTINGS.compact_at { compact("") }
     before = len(MESSAGES)
     change MESSAGES = push(MESSAGES, {role: "user", content: user_text})
@@ -256,6 +279,11 @@ to agent_turn(user_text) {
         try {
             r = nv_chat(MESSAGES, tools)
         } else problem {
+            when has(problem, STOPPED) {
+                show yellow("  ■ Stopped.")
+                stopped_note(steps, before)
+                give no
+            }
             show red("  " + explain_problem(problem))
             when steps == 1 {
                 # nothing happened yet: forget the message, so that the next
@@ -318,19 +346,57 @@ to agent_turn(user_text) {
             give yes
         }
         n = 0
+        stopping = no
         each call in calls {
             n += 1
             name = arg(call.function, "name", "?")
             id = arg(call, "id", "call_{steps}_{n}")
             a = inputs_of(call)
-            when a == nothing {
+            # every tool call gets an answer, even after Esc, or the next
+            # request would be refused
+            when not stopping and esc_pressed() { stopping = yes }
+            when stopping {
+                result = "Not run: the user stopped the work (Esc)."
+            } else when a == nothing {
                 tool_header(name, "")
                 result_line(red("the model sent inputs that aren't valid JSON"))
                 result = "Error: the arguments were not valid JSON. Send them again as a JSON object."
             } else {
-                result = run_tool(name, a)
+                same = name + " " + to_json(a)
+                when has(READ_ONLY, name) and times_in(looks, same) >= 2 {
+                    tool_header("Skipped", name)
+                    result_line(yellow("the same look, twice already, with nothing changed since"))
+                    result = "Not run: you already made this exact call twice in this request, and nothing has changed since, so its result is above. Use it, and move on to the next step."
+                } else when times_in(failed_calls, same) >= 2 {
+                    tool_header("Skipped", name)
+                    result_line(yellow("the same call failed twice already, so it wasn't run again"))
+                    result = "Not run: this exact call (same tool, same inputs) has already failed twice in this request, so it would fail again. Don't repeat it: read the file again and copy the text exactly, try a different way, or ask the user."
+                } else {
+                    result = run_tool(name, a)
+                    when begins(result, "Error") { failed_calls = push(failed_calls, same) }
+                    when has(READ_ONLY, name) { looks = push(looks, same) }
+                }
+            }
+            when not stopping {
+                when begins(result, "Error") or begins(result, "Not run") {
+                    fails += 1
+                } else when not has(READ_ONLY, name) {
+                    fails = 0
+                    looks = []
+                }
             }
             change MESSAGES = push(MESSAGES, {role: "tool", tool_call_id: id, name: name, content: result})
+        }
+        when stopping {
+            show yellow("  ■ Stopped.")
+            stopped_note(steps, before)
+            give no
+        }
+        when fails >= LOOP_LIMIT {
+            show yellow("  ■ Stopped: the last {fails} steps failed, with no change that worked in between, so it seems stuck.")
+            show dim("  Say \"continue\" to let it try again, or tell it what to do differently (/model switches to another model).")
+            save_session()
+            give no
         }
         when was_cut {
             change MESSAGES = push(MESSAGES, {role: "user", content: "Your last reply was cut off because it reached the length limit ({SETTINGS.max_tokens} tokens), so anything unfinished in it was lost (finished tool calls were run). Carry on from where you were. Write long files in parts: create the file with write_file holding the first part (up to about 250 lines), then add the rest with append_file, one part at a time. Keep your thinking short."})

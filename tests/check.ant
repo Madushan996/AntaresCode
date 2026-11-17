@@ -158,12 +158,19 @@ check(read(base + "/multi.txt") == "alpha\nbeta\ngamma\n", "undo again goes back
 check(len(undo_last()) == 0, "nothing more to undo")
 check(line_count_diff(["a", "b", "b"], ["b"]) == 2, "line_count_diff")
 
-# web search results, from a saved results page
-page = "<div class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.rs%2Fserde%2F&amp;rut=1\">Serde &amp; <b>JSON</b></a> x <a class=\"result__snippet\" href=\"y\">A <b>fast</b> library</a>"
-page += "<a class=\"result__a\" href=\"https://duckduckgo.com/y.js?ad=1\">An advert</a>"
-found = search_results(page)
-check(len(found) == 1 and found[0].url == "https://docs.rs/serde/" and found[0].title == "Serde & JSON" and found[0].snippet == "A fast library", "search_results: {found}")
+# web search results, from saved answers
+t = tavily_results(json("\{\"answer\":\"x\",\"results\":[\{\"title\":\"Serde &amp; JSON\",\"url\":\"https://serde.rs\",\"content\":\"A fast library\"}]}"))
+check(len(t) == 1 and t[0].title == "Serde & JSON" and t[0].url == "https://serde.rs" and t[0].snippet == "A fast library", "tavily_results: {t}")
+w = wiki_results(json("\{\"query\":\{\"search\":[\{\"title\":\"Rust (programming language)\",\"snippet\":\"a <span class=\\\"searchmatch\\\">borrow</span> checker\"}]}}"))
+check(w[0].url == "https://en.wikipedia.org/wiki/Rust_(programming_language)" and w[0].snippet == "a borrow checker" and w[0].source == "Wikipedia", "wiki_results: {w}")
+so = so_results(json("\{\"items\":[\{\"title\":\"How do I read a &quot;JSON&quot; file?\",\"link\":\"https://stackoverflow.com/q/1\",\"score\":42,\"is_answered\":true,\"tags\":[\"python\",\"json\"]}]}"))
+check(so[0].title == "How do I read a \"JSON\" file?" and has(so[0].snippet, "42 votes, answered") and has(so[0].snippet, "python, json"), "so_results: {so}")
+g = github_results(json("\{\"items\":[\{\"full_name\":\"a/b\",\"html_url\":\"https://github.com/a/b\",\"description\":null,\"stargazers_count\":7}]}"))
+check(g[0].title == "a/b" and has(g[0].snippet, "★ 7"), "github_results: {g}")
+check(take_turns([[1, 2, 3], [10], [20, 21]], 5) == [1, 10, 20, 2, 21], "take_turns")
 check(url_decode("a%20b%2Fc") == "a b/c", "url_decode")
+check(times_in(["a", "b", "a"], "a") == 2, "times_in")
+check(PROVIDERS.tavily.name == "Tavily" and not has(PROVIDER_ORDER, "tavily"), "Tavily is a key, not a model service")
 
 # programs in the background
 r = run_tool("start_process", {command: "echo started && ping -n 30 127.0.0.1 > nul"})
@@ -234,7 +241,7 @@ check(base_model("nvidia/nemotron-3-ultra-550b-a55b:free") == "nvidia/nemotron-3
 check(provider_of("nvidia/nemotron-3-ultra-550b-a55b") == "nvidia" and provider_of("nvidia/nemotron-3-ultra-550b-a55b:free") == "openrouter", "the service is told apart by :free, not by the maker")
 check(place_in(["a", "b"], "b") == 1 and place_in(["a"], "z") == -1, "place_in")
 saved_keys = KEYS
-KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: "sk-or-test"}
+KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: "sk-or-test", tavily: nothing}
 check(same_model_elsewhere("nvidia/nemotron-3-ultra-550b-a55b:free", []) == "nvidia/nemotron-3-ultra-550b-a55b", "an OpenRouter model's NVIDIA twin")
 check(same_model_elsewhere("nvidia/nemotron-3-ultra-550b-a55b", ["nvidia/nemotron-3-ultra-550b-a55b:free"]) == "nvidia/nemotron-3-ultra-550b-a55b:free", "an NVIDIA model's OpenRouter twin")
 check(same_model_elsewhere("cohere/north-mini-code:free", []) == nothing, "no twin")

@@ -168,7 +168,7 @@ to connect(w) {
         erase_line()
         when c.ok {
             save_key(w.p, answer)
-            show "    " + green("✓ Connected.") + dim(" {c.count} models you can use.")
+            when w.p == "tavily" { show "    " + green("✓ Connected.") + dim(" Web searches now cover the whole web.") } else { show "    " + green("✓ Connected.") + dim(" {c.count} models you can use.") }
             give c.models
         }
         show "    " + red("✗ That key didn't work: {c.problem}.") + dim(" Check you copied all of it, and paste it again.")
@@ -178,9 +178,12 @@ to connect(w) {
 
 # The welcome screen: services and keys, a model, how it works, memory.
 # Gives yes if at least one service is connected at the end.
+# Web search, the optional last step.
+SEARCH_STEP = {p: "tavily", about: "web search made for AI agents: free for 1,000 searches a month", get: "Sign up (free, no card needed) and copy the API key shown on the first page"}
+
 to run_setup(first) {
     when SETTINGS.color { clear() }
-    total = 4
+    total = 5
     if_new = "Welcome to Antares Code"
     when not first { if_new = "Antares Code setup" }
     show ""
@@ -198,7 +201,7 @@ to run_setup(first) {
         [["It's a coding agent in your terminal: tell it what you want in plain words,", "dim"]],
         [["and it reads your code, edits files, runs commands and checks its work.", "dim"]],
         [],
-        [["Setting it up takes about two minutes, in four short steps.", "dim"]],
+        [["Setting it up takes about two minutes, in five short steps (the last is optional).", "dim"]],
     ])
 
     # ---- 1. services
@@ -324,6 +327,19 @@ to run_setup(first) {
     set_setting("memory", on)
     when on { show "  " + green("✓ ") + "Memory on" } else { show "  " + green("✓ ") + "Memory off" + dim(" (/memory on turns it on)") }
 
+    # ---- 5. web search
+    step_title(5, total, "Web search (optional)")
+    show "  To search the web, Antares Code uses Tavily, a search service made for AI agents:"
+    show "  free for 1,000 searches a month, with no card needed. Without a key, its searches"
+    show "  only cover Wikipedia, Stack Overflow and GitHub."
+    question = "  Set it up now? (y/N) › "
+    when has_key("tavily") {
+        show "  " + green("✓ connected") + dim("  ({masked(KEYS.tavily)})")
+        question = "  Change the key? (y/N) › "
+    }
+    answer = answer_to(brand(question))
+    when answer != nothing and begins(lower(trim(answer)), "y") { connect(SEARCH_STEP) } else when not has_key("tavily") { show dim("  Skipped: /setup brings this back.") }
+
     # ---- ready
     show ""
     draw_box([
@@ -346,13 +362,14 @@ to run_setup(first) {
 
 to show_keys() {
     show ""
-    each p in PROVIDER_ORDER {
+    each p in push(PROVIDER_ORDER, "tavily") {
         k = KEYS[p]
         state = dim("not set")
         when k != nothing { state = green("set") + dim("  " + masked(k)) }
+        when p == "tavily" { state += dim("  (web search)") }
         show "  " + bold(pad(provider_name(p), 12)) + state
     }
-    show dim("  Kept in {keys_file()} (or from NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY). /setup changes them.")
+    show dim("  Kept in {keys_file()} (or from NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY). /setup changes them.")
     show ""
 }
 

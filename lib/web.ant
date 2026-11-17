@@ -1,7 +1,12 @@
-# Antares Code: searching the web (through DuckDuckGo's plain HTML page,
-# which needs no key).
+# Antares Code: searching the web.
+#
+# With a Tavily key (free for 1,000 searches a month: /setup adds one), it
+# searches the whole web through Tavily, a search service made for AI agents.
+# Without one, it searches the sources that let programs search them freely:
+# Wikipedia, Stack Overflow and GitHub. (Search engines' own pages, such as
+# DuckDuckGo's, now turn programs away.)
 
-SEARCH_URL = "https://html.duckduckgo.com/html/"
+AGENT = {"User-Agent": "Antares-Code (https://github.com/Madushan996/AntaresCode)", Accept: "application/json"}
 
 # The text between `start` and `until` in s, after the first `start`, or "".
 to between(s, start, until) {
@@ -18,7 +23,7 @@ to between(s, start, until) {
 to plain(html) {
     out = ""
     inside = no
-    each ch in split(html, "") {
+    each ch in split(text(html), "") {
         when ch == "<" {
             inside = yes
         } else when ch == ">" {
@@ -57,44 +62,133 @@ to url_decode(s) {
     give out
 }
 
-# The results on a DuckDuckGo results page: {title, url, snippet}.
-to search_results(html) {
-    found = []
-    parts = split(html, "class=\"result__a\"")
-    each k in range(len(parts)) {
-        when k == 0 { skip }
-        part = parts[k]
-        href = between(part, "href=\"", "\"")
-        title = plain(between(part, ">", "</a>"))
-        raw = between(part, "class=\"result__snippet\"", "</a>")
-        snippet = plain(slice(raw, find(raw, ">") + 1))
-        when has(href, "uddg=") { href = url_decode(between(href + "&", "uddg=", "&")) }
-        when begins(href, "//") { href = "https:" + href }
-        # adverts go through a tracking address: leave them out
-        when has(href, "duckduckgo.com/y.js") or href == "" { skip }
-        found = push(found, {title: title, url: href, snippet: snippet})
+# ---------- reading each source's answer: [{title, url, snippet, source}] ----------
+
+to tavily_results(r) {
+    out = []
+    each x in arg(r, "results", []) {
+        out = push(out, {title: plain(arg(x, "title", "")), url: text(arg(x, "url", "")), snippet: one_line(plain(arg(x, "content", "")), 300), source: "web"})
     }
-    give found
+    give out
+}
+
+to wiki_results(r) {
+    out = []
+    each x in arg(arg(r, "query", {}), "search", []) {
+        title = text(arg(x, "title", ""))
+        out = push(out, {title: title, url: "https://en.wikipedia.org/wiki/" + replace(title, " ", "_"), snippet: plain(arg(x, "snippet", "")), source: "Wikipedia"})
+    }
+    give out
+}
+
+to so_results(r) {
+    out = []
+    each x in arg(r, "items", []) {
+        answered = "no accepted answer"
+        when arg(x, "is_answered", no) { answered = "answered" }
+        tags = join(slice(arg(x, "tags", []), 0, 4), ", ")
+        out = push(out, {title: plain(arg(x, "title", "")), url: text(arg(x, "link", "")), snippet: "{arg(x, "score", 0)} votes, {answered}; tags: {tags}", source: "Stack Overflow"})
+    }
+    give out
+}
+
+to github_results(r) {
+    out = []
+    each x in arg(r, "items", []) {
+        about = arg(x, "description", "")
+        when about == nothing { about = "" }
+        out = push(out, {title: text(arg(x, "full_name", "")), url: text(arg(x, "html_url", "")), snippet: one_line(text(about), 200) + " (★ {arg(x, "stargazers_count", 0)})", source: "GitHub"})
+    }
+    give out
+}
+
+# Takes results from several lists in turn: the first of each, then the
+# second of each, and so on, up to `wanted`.
+to take_turns(lists, wanted) {
+    out = []
+    i = 0
+    more = yes
+    while more and len(out) < wanted {
+        more = no
+        each l in lists {
+            when i < len(l) and len(out) < wanted {
+                out = push(out, l[i])
+                more = yes
+            }
+        }
+        i += 1
+    }
+    give out
+}
+
+# ---------- searching ----------
+
+# A Tavily search: {answer, results}.
+to tavily_search(query, wanted) {
+    h = {Authorization: "Bearer " + KEYS.tavily, Accept: "application/json"}
+    r = json(fetch(PROVIDERS.tavily.base + "/search", {headers: h, body: {query: query, max_results: wanted, search_depth: "basic", include_answer: yes}, timeout: 30}))
+    answer = arg(r, "answer", "")
+    when answer == nothing { answer = "" }
+    give {answer: text(answer), results: tavily_results(r)}
+}
+
+# Wikipedia, Stack Overflow and GitHub, taking turns.
+to free_search(query, wanted) {
+    each_wants = max(2, floor(wanted / 2) + 1)
+    lists = []
+    try {
+        lists = push(lists, wiki_results(json(fetch("https://en.wikipedia.org/w/api.php", {query: {action: "query", list: "search", srsearch: query, format: "json", srlimit: each_wants, utf8: 1}, headers: AGENT, timeout: 20}))))
+    } else problem { nothing }
+    try {
+        lists = push(lists, so_results(json(fetch("https://api.stackexchange.com/2.3/search/advanced", {query: {order: "desc", sort: "relevance", q: query, site: "stackoverflow", pagesize: each_wants}, headers: AGENT, timeout: 20}))))
+    } else problem { nothing }
+    try {
+        lists = push(lists, github_results(json(fetch("https://api.github.com/search/repositories", {query: {q: query, per_page: each_wants}, headers: AGENT, timeout: 20}))))
+    } else problem { nothing }
+    give take_turns(lists, wanted)
 }
 
 to tool_web_search(a) {
     query = text(a.query)
     wanted = floor(clip(arg(a, "count", 6), 1, 10))
     tool_header("Web Search", "\"" + one_line(query, 80) + "\"")
-    html = fetch(SEARCH_URL, {query: {q: query}, timeout: 30})
-    results = search_results(html)
-    when len(results) == 0 {
-        result_line("no results")
-        give "No results for \"{query}\". Try other words."
+    answer = ""
+    results = []
+    from = ""
+    note = ""
+    when has_key("tavily") {
+        try {
+            got = tavily_search(query, wanted)
+            answer = got.answer
+            results = got.results
+            from = "Tavily"
+        } else problem {
+            why = one_line(problem, 160)
+            when has(problem, "error 401") or has(problem, "error 403") { why = "it didn't accept the key (/setup changes it)" }
+            when has(problem, "error 429") or has(problem, "error 432") or has(problem, "error 433") { why = "the key's searches are used up for now" }
+            detail(yellow("Tavily: " + why + "; searching Wikipedia, Stack Overflow and GitHub instead"))
+            note = "(Tavily didn't work: " + why + ". These come from Wikipedia, Stack Overflow and GitHub only.)"
+        }
     }
-    results = slice(results, 0, min(wanted, len(results)))
-    result_line("{len(results)} results")
+    when from == "" {
+        results = free_search(query, wanted)
+        from = "Wikipedia, Stack Overflow and GitHub"
+        when note == "" { note = "(No web search key is set, so these come from Wikipedia, Stack Overflow and GitHub only; for other sites, read a page you know with fetch_url, such as the official documentation. The user can add a free Tavily key with /setup to search the whole web.)" }
+    }
+    when len(results) == 0 and answer == "" {
+        result_line("no results" + dim(" ({from})"))
+        give "No results for \"{query}\" from {from}. Try other words. {note}"
+    }
+    result_line("{len(results)} results" + dim(" from {from}"))
     out = []
+    when answer != "" { out = push(out, "Answer from the search service: " + answer + "\n") }
     n = 0
     each r in results {
         n += 1
-        detail(dim("{n}. {one_line(r.title, 90)}"))
-        out = push(out, "{n}. {r.title}\n   {r.url}\n   {r.snippet}")
+        label = ""
+        when r.source != "web" { label = " ({r.source})" }
+        detail(dim("{n}. {one_line(r.title, 90)}{label}"))
+        out = push(out, "{n}. {r.title}{label}\n   {r.url}\n   {r.snippet}")
     }
-    give join(out, "\n") + "\n\n(Read a page with fetch_url.)"
+    give join(out, "\n") + "\n\n(Read a page with fetch_url.) " + note
 }

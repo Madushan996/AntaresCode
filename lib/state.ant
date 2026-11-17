@@ -32,7 +32,7 @@ SETTINGS = {
 }
 
 DEFAULT_SETTINGS = SETTINGS  # kept as they are here, for /reset
-KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing}   # API keys, by service
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing, tavily: nothing}   # API keys, by service (and Tavily, for web search)
 WORKDIR = "."
 MESSAGES = []               # the conversation, in the OpenAI chat format
 TODOS = []                  # the model's task list
@@ -43,6 +43,7 @@ HAS_RG = no                 # ripgrep is installed: faster search
 IN_GIT = no
 MAX_STEPS = 200             # tool rounds allowed in one turn
 PRINT_MODE = no             # -p: answer one prompt and exit
+STOPPED = "stopped with Esc"   # the problem a request fails with when you press Esc
 RUN_ONLY = {}               # settings changed for this run only, with their saved values
 TURN = 0                    # how many requests the user has made
 CHECKPOINTS = []            # files as they were before each change: {turn, path, before}

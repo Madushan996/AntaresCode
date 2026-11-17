@@ -12,6 +12,8 @@ PROVIDERS = {
     nvidia: {name: "NVIDIA", base: "https://integrate.api.nvidia.com/v1", site: "https://build.nvidia.com", env: ["NVIDIA_API_KEY"], starts: ["nvapi-"]},
     gemini: {name: "Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", site: "https://aistudio.google.com/apikey", env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], starts: ["AIza", "AQ."]},
     openrouter: {name: "OpenRouter", base: "https://openrouter.ai/api/v1", site: "https://openrouter.ai/keys", env: ["OPENROUTER_API_KEY"], starts: ["sk-or-"]},
+    # not a model service: web search (see lib/web.ant)
+    tavily: {name: "Tavily", base: "https://api.tavily.com", site: "https://app.tavily.com", env: ["TAVILY_API_KEY"], starts: ["tvly-"]},
 }
 PROVIDER_ORDER = ["nvidia", "gemini", "openrouter"]
 
@@ -71,7 +73,7 @@ to load_keys() {
         try { saved = load(keys_file()) } else problem { saved = {} }
     }
     found = {}
-    each p in PROVIDER_ORDER {
+    each p in push(PROVIDER_ORDER, "tavily") {
         k = nothing
         each name in PROVIDERS[p].env {
             v = env(name)
@@ -208,6 +210,11 @@ to post_chat(body) {
         wait(0.1)
         frame += 1
         spinner_turn(frame)
+        when esc_pressed() {
+            spinner_stop()
+            stop_request(dir)
+            fail(STOPPED)
+        }
         when clock() - started > SETTINGS.timeout + 20 {
             spinner_stop()
             fail("the request timed out after {SETTINGS.timeout} s")
@@ -235,6 +242,21 @@ to post_chat(body) {
 
 # Sends a chat request, trying again when the service is busy. `tools` is
 # yes (all of them), no (none) or a list of tool descriptions.
+# Ends a request still running in the background (after Esc), so that its
+# answer can't turn up as the answer to the next one.
+to stop_request(dir) {
+    when exists(dir + "/key.cfg") {
+        try { delete(dir + "/key.cfg") } else problem { nothing }
+    }
+    script = native(dir + "/stop.ps1")
+    write(script, "Get-CimInstance Win32_Process -Filter \"Name='curl.exe'\" | Where-Object \{ $_.CommandLine -like '*" + native(dir) + "*' } | ForEach-Object \{ Stop-Process -Id $_.ProcessId -Force }\n")
+    try {
+        shell("powershell -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"", {timeout: 30})
+    } else problem {
+        nothing
+    }
+}
+
 to nv_chat(messages, tools) {
     body = {"model": SETTINGS.model_id, messages: messages, max_tokens: SETTINGS.max_tokens, temperature: SETTINGS.temperature}
     specs = []
@@ -262,7 +284,7 @@ to nv_chat(messages, tools) {
             busy = has(problem, "error 429") or has(problem, "error 500") or has(problem, "error 502") or has(problem, "error 503") or has(problem, "error 504")
             when not busy or attempt >= 3 { fail(problem) }
             show dim("  (the service is busy; trying again in {attempt * 3} s)")
-            wait(attempt * 3)
+            when wait_or_stop(attempt * 3) { fail(STOPPED) }
         }
     }
 }
@@ -355,6 +377,11 @@ to test_model(id) {
 # (OpenRouter's list is public, so its key is checked on its own first.)
 to check_key(p, key) {
     try {
+        # Tavily's usage page checks a key without spending a search
+        when p == "tavily" {
+            fetch(PROVIDERS[p].base + "/usage", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30})
+            give {ok: yes, count: 0, models: [], problem: ""}
+        }
         when p == "openrouter" { fetch(PROVIDERS[p].base + "/key", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}) }
         ids = provider_models(p, key)
         give {ok: yes, count: len(ids), models: ids, problem: ""}

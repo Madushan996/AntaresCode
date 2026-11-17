@@ -99,7 +99,8 @@ Then:
    Environment Variables, Path, Edit, New, and paste the folder).
 4. **Start it** in a project: `cd C:\path\to\your\project`, then `acode`.
 
-The first time, a welcome screen takes you through four short steps:
+The first time, a welcome screen takes you through five short steps (the last
+is optional):
 
 1. **Connect an AI service**: pick Gemini, OpenRouter or NVIDIA (or several).
    For each, it shows how to get a key and opens the page in your browser
@@ -115,6 +116,10 @@ The first time, a welcome screen takes you through four short steps:
    or asking before every change.
 4. **Memory**: whether to remember things about you and your projects
    between sessions.
+5. **Web search** (optional): a free key from [Tavily](https://app.tavily.com),
+   a search service made for AI agents (1,000 searches a month, no card
+   needed; it starts with `tvly-`), so that web searches cover the whole
+   web. Without one, they cover Wikipedia, Stack Overflow and GitHub.
 
 ![The welcome screen, at step 1: connect an AI service](docs/welcome.png)
 
@@ -122,8 +127,8 @@ Then it shows a few tips and starts. `/setup` brings the welcome screen back
 to change any of it, `/keys` shows which keys are set, and `/reset` removes
 your keys and settings and starts again from the beginning (`/reset all`
 also erases memory and saved conversations). Keys can also come
-from the `NVIDIA_API_KEY`, `GEMINI_API_KEY` and `OPENROUTER_API_KEY`
-environment variables.
+from the `NVIDIA_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` and
+`TAVILY_API_KEY` environment variables.
 
 Optional: **ripgrep** (`rg`) for faster searching, and **git** for
 `/review`, `/commit` and the best `/diff`.
@@ -154,6 +159,14 @@ shows how long it took, the tokens it used, and how many files it changed.
 | `!command` | Runs a command yourself; the model sees its output |
 | a line ending in `\` | Carries on typing on the next line |
 | `exit` | Leaves (Ctrl+C also quits, at once) |
+
+**Stopping it.** Press **Esc** while it works to stop it: it stops waiting
+for the model straight away (or before the next step, if a command is
+running), and what it did so far is kept, so you can tell it what to do
+instead, or say "continue". It also stops by itself when it is stuck: a step
+that has failed twice with the same inputs isn't run a third time, the same
+look at an unchanged file isn't repeated a third time, and after 8 failed
+steps in a row, with no change that worked in between, it stops and says so.
 
 ## Commands
 
@@ -229,7 +242,7 @@ Then `/explain src/parser.py` sends that request.
 | `run_command` | Bash | A command (cmd on Windows, sh elsewhere) | yes |
 | `start_process` | Start | A server, watcher or game, in the background | yes |
 | `process_output`, `stop_process` | Output, Stop | What it printed; stopping it and all it started | no |
-| `web_search` | Web Search | The web (DuckDuckGo): titles, addresses, snippets | no |
+| `web_search` | Web Search | The whole web with a Tavily key (free; `/setup` adds one), otherwise Wikipedia, Stack Overflow and GitHub: titles, addresses, snippets | no |
 | `fetch_url` | Fetch | A web page, as readable text | no |
 | `task` | Task | A helper agent that researches with the read-only tools and reports back | no |
 | `ask_user` | Question | Asks you a question when a choice really is yours | no |
@@ -398,7 +411,7 @@ flowchart LR
 
     project[("Your project folder<br/>files, git, ANTARES.md")]
     data[("~/.antares-code<br/>keys, settings, memory,<br/>saved conversations")]
-    ddg["DuckDuckGo"]
+    ddg["Tavily, or Wikipedia,<br/>Stack Overflow and GitHub"]
     github["GitHub releases"]
 
     you <--> start
@@ -456,7 +469,7 @@ The files:
 | `lib/setup.ant` | The welcome screen (`/setup`, `/reset`), and moving settings to your settings folder |
 | `lib/update.ant` | Checking for new versions on GitHub, and installing them (`/update`) |
 | `lib/tools.ant` | The file, search and command tools, and asking before edits and commands |
-| `lib/web.ant` | Web search |
+| `lib/web.ant` | Web search: Tavily, or Wikipedia, Stack Overflow and GitHub |
 | `lib/processes.ant` | Programs in the background |
 | `lib/history.ant` | Keeping files as they were, for `/diff` and `/undo` |
 | `lib/memory.ant` | Remembering you and your projects between sessions |
@@ -478,11 +491,15 @@ The files:
 - OpenRouter needs a key even for its free models, and limits how many
   requests they get each day. Without colours (or with `-p`),
   requests are made directly and the star doesn't move.
-- Ctrl+C quits Antares Code at once; there is no way to stop just the current
-  step, and programs started in the background keep running if you quit that
-  way (`taskkill` or Task Manager stops them).
+- Esc stops it between steps and while it waits for the model, but a command
+  that is running (`run_command`) finishes first (it has a time limit). Keys
+  you type while it works are not kept for the next message.
+- Ctrl+C quits Antares Code at once, and programs started in the background
+  keep running if you quit that way (`taskkill` or Task Manager stops them).
 - The conversation size is estimated (about 4 characters a token). When it
   passes 60,000 tokens it is summarised automatically.
-- Web search uses DuckDuckGo's plain results page; if it changes, searching
-  stops working until Antares Code is updated.
+- Search engines' own pages (DuckDuckGo's, Google's, Bing's) turn programs
+  away, so searching the whole web needs a key: Tavily's is free for 1,000
+  searches a month. Without one, searches cover Wikipedia, Stack Overflow and
+  GitHub, and pages you know can still be read with `fetch_url`.
 - What you paste at `/setup` shows on the screen as you paste it.
