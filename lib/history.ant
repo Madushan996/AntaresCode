@@ -1,0 +1,160 @@
+# Antares Code: what the model changed, so it can be looked at (/diff) and
+# taken back (/undo). Before a tool changes a file, the file as it was is
+# kept: its text, or nothing if it didn't exist yet. Commands the model runs
+# can change files too; those changes can't be taken back this way.
+
+# Keeps a file as it is now, once per request.
+to snapshot(p) {
+    each c in CHECKPOINTS {
+        when c.turn == TURN and c.path == p { give nothing }
+    }
+    before = nothing
+    when exists(p) and not is_folder(p) {
+        try {
+            before = read(p)
+        } else problem {
+            # not text (a picture, say): it can't be kept
+            give nothing
+        }
+    }
+    change CHECKPOINTS = push(CHECKPOINTS, {turn: TURN, path: p, before: before})
+}
+
+# Undoes the file changes of the latest request that made any. Gives the
+# list of what was put back.
+to undo_last() {
+    when len(CHECKPOINTS) == 0 { give [] }
+    last = 0
+    each c in CHECKPOINTS { last = max(last, c.turn) }
+    restored = []
+    kept = []
+    each c in CHECKPOINTS {
+        when c.turn != last { kept = push(kept, c) }
+    }
+    # newest first, so a file changed twice ends up as it first was
+    each c in reverse(filter(CHECKPOINTS, c => c.turn == last)) {
+        when c.before == nothing {
+            when exists(c.path) { delete(c.path) }
+            restored = push(restored, "removed " + rel(c.path))
+        } else {
+            make_folder(parent_of(c.path))
+            write(c.path, c.before)
+            restored = push(restored, "restored " + rel(c.path))
+        }
+    }
+    change CHECKPOINTS = kept
+    give unique(restored)
+}
+
+to command_undo() {
+    done = undo_last()
+    when len(done) == 0 {
+        show dim("  Nothing to undo: no files have been changed in this conversation.")
+        give nothing
+    }
+    each d in done { show green("  ↶ ") + d }
+    # the model should know, so it doesn't build on what is gone
+    change MESSAGES = push(MESSAGES, {role: "user", content: "I undid your file changes from my last request (" + join(done, ", ") + "). Those files are back as they were before it."})
+    change MESSAGES = push(MESSAGES, {role: "assistant", content: "Understood: those changes are undone, and I'll work from the files as they are now."})
+    show dim("  (Commands the model ran aren't undone.)")
+}
+
+# How each changed file differs from how it was before this conversation
+# changed it: {path, state, added, removed}.
+to changes() {
+    seen = []
+    out = []
+    each c in CHECKPOINTS {
+        when has(seen, c.path) { skip }
+        seen = push(seen, c.path)
+        now = nothing
+        when exists(c.path) {
+            try { now = read(c.path) } else problem { now = nothing }
+        }
+        when now == c.before { skip }
+        state = "changed"
+        when c.before == nothing { state = "new" }
+        when now == nothing { state = "deleted" }
+        old_lines = []
+        new_lines = []
+        when c.before != nothing { old_lines = lines(c.before) }
+        when now != nothing { new_lines = lines(now) }
+        out = push(out, {path: c.path, state: state, added: line_count_diff(new_lines, old_lines), removed: line_count_diff(old_lines, new_lines), before: c.before})
+    }
+    give out
+}
+
+# How many lines of `a` aren't matched by a line of `b` (counting repeats).
+to line_count_diff(a, b) {
+    counts = {}
+    each l in b {
+        counts[l] = arg(counts, l, 0) + 1
+    }
+    extra = 0
+    each l in a {
+        n = arg(counts, l, 0)
+        when n > 0 { counts[l] = n - 1 } else { extra += 1 }
+    }
+    give extra
+}
+
+to command_diff(rest) {
+    all = changes()
+    when len(all) == 0 {
+        show dim("  No files have been changed in this conversation.")
+        give nothing
+    }
+    when rest == "" {
+        show ""
+        each c in all {
+            mark = yellow("M")
+            when c.state == "new" { mark = green("A") }
+            when c.state == "deleted" { mark = red("D") }
+            show "  " + mark + " " + pad(rel(c.path), 50) + green("+{c.added}") + " " + red("-{c.removed}")
+        }
+        show dim("  /diff <file> shows one in full; /undo takes back the last request's changes.")
+        show ""
+        give nothing
+    }
+    target = full_path(rest)
+    found = filter(all, c => lower(c.path) == lower(target))
+    when len(found) == 0 {
+        show yellow("  {rest} hasn't been changed in this conversation.")
+        give nothing
+    }
+    c = found[0]
+    before = c.before
+    when before == nothing { before = "" }
+    # git shows differences best, when it is there
+    before_file = DATA_DIR + "/.diff_before"
+    write(before_file, before)
+    after_file = c.path
+    when not exists(after_file) {
+        after_file = DATA_DIR + "/.diff_after"
+        write(after_file, "")
+    }
+    colour = "--color=never"
+    when SETTINGS.color { colour = "--color=always" }
+    r = shell("git diff --no-index " + colour + " -- \"" + native(before_file) + "\" \"" + native(after_file) + "\"", {timeout: 30})
+    show ""
+    show bold(rel(c.path)) + dim("  ({c.state}: +{c.added} -{c.removed})")
+    when has(r.output, "@@") {
+        started = no
+        each l in lines(r.output) {
+            when has(l, "@@") { started = yes }
+            when started { show "  " + l }
+        }
+    } else {
+        # without git: the lines that went, then the lines that came
+        old_lines = lines(before)
+        new_lines = []
+        when exists(c.path) { new_lines = lines(read(c.path)) }
+        each l in old_lines {
+            when not has(new_lines, l) { show "  " + red("- " + code_line(l, 150)) }
+        }
+        each l in new_lines {
+            when not has(old_lines, l) { show "  " + green("+ " + code_line(l, 150)) }
+        }
+    }
+    show ""
+}

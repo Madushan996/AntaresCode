@@ -1,0 +1,245 @@
+# Antares Code: colours, layout and small text helpers.
+
+ESC = char(27)
+
+to paint(s, codes) {
+    when not SETTINGS.color { give s }
+    give "{ESC}[{codes}m{s}{ESC}[0m"
+}
+to dim(s) = paint(s, "2")
+to bold(s) = paint(s, "1")
+to red(s) = paint(s, "31")
+to green(s) = paint(s, "32")
+to yellow(s) = paint(s, "33")
+to cyan(s) = paint(s, "36")
+to magenta(s) = paint(s, "35")
+to brand(s) = paint(s, "38;5;209")       # the red-orange of the star Antares
+
+to begins(s, start) = len(s) >= len(start) and slice(s, 0, len(start)) == start
+to ends(s, tail) = len(s) >= len(tail) and slice(s, len(s) - len(tail)) == tail
+to count_of(s, part) = len(split(s, part)) - 1
+
+# The first and last part of a long text, with a note of what was cut.
+to squeeze(s, limit) {
+    when len(s) <= limit { give s }
+    half = floor(limit / 2)
+    give slice(s, 0, half) + "\n... [{len(s) - limit} characters cut] ...\n" + slice(s, len(s) - half)
+}
+
+# One line, at most `n` characters.
+to one_line(s, n) {
+    flat = trim(replace(replace(text(s), CR, ""), "\n", " "))
+    when len(flat) > n { give slice(flat, 0, n - 1) + "…" }
+    give flat
+}
+
+# A line of code as it is (indentation kept), at most `n` characters.
+to code_line(s, n) {
+    l = replace(replace(text(s), CR, ""), "\t", "    ")
+    when len(l) > n { give slice(l, 0, n - 1) + "…" }
+    give l
+}
+
+# Erases the line above (the "working" note) when colours are on: up to it,
+# clear it, up once more, and the new line that `show` adds lands on it.
+to erase_line() {
+    when SETTINGS.color { show "{ESC}[1A{ESC}[2K{ESC}[1A" }
+}
+
+# "  ⎿  summary" under a tool call, then any detail lines.
+to result_line(summary) {
+    show indent() + dim("  ⎿  ") + summary
+}
+to detail(s) {
+    show indent() + "     " + s
+}
+
+# Tools a helper agent uses are shown set in, under its task.
+to indent() {
+    when IN_TASK { give "    " }
+    give ""
+}
+
+# A tool call, the way it is shown on screen: ● Name(argument)
+to tool_header(title, argument) {
+    when not IN_TASK { show "" }
+    show indent() + brand("●") + " " + bold(title) + dim("(") + argument + dim(")")
+}
+
+# Shows the first few lines of a result, and how many more there are.
+to preview(body, count) {
+    all = lines(body)
+    shown = 0
+    each l in all {
+        when shown >= count { stop }
+        detail(dim(code_line(l, 160)))
+        shown += 1
+    }
+    when len(all) > count { detail(dim("… +{len(all) - count} lines")) }
+}
+
+# Light Markdown for the model's replies: headings, bold and code blocks.
+to render(md) {
+    in_code = no
+    each l in lines(md) {
+        when begins(trim(l), "```") {
+            in_code = not in_code
+            skip
+        }
+        when in_code {
+            show "  " + cyan(l)
+        } else when begins(l, "#") {
+            show bold(trim(replace(l, "#", "")))
+        } else {
+            show inline_bold(l)
+        }
+    }
+}
+
+to inline_bold(l) {
+    when count_of(l, "**") < 2 { give l }
+    parts = split(l, "**")
+    out = ""
+    each i in range(len(parts)) {
+        when i % 2 == 1 { out += bold(parts[i]) } else { out += parts[i] }
+    }
+    give out
+}
+
+# Up to `count` lines of a diff: removed lines in red, added in green.
+to show_diff(old, new, count) {
+    before = lines(old)
+    after = lines(new)
+    n = 0
+    each l in before {
+        when n >= count { stop }
+        detail(red("- " + code_line(l, 150)))
+        n += 1
+    }
+    each l in after {
+        when n >= count * 2 { stop }
+        detail(green("+ " + code_line(l, 150)))
+        n += 1
+    }
+    left = len(before) + len(after) - n
+    when left > 0 { detail(dim("… +{left} lines")) }
+}
+
+to rel(p) {
+    base = WORKDIR + "/"
+    when begins(lower(p), lower(base)) { give slice(p, len(base)) }
+    give p
+}
+
+# A number typed by the user, or nothing if it isn't one.
+to number_or_nothing(t) {
+    try { give number(trim(t)) } else problem { give nothing }
+}
+
+to repeat_text(s, n) {
+    out = ""
+    repeat n { out += s }
+    give out
+}
+
+# ---------- the star ----------
+# While waiting for a reply, a star twinkles: it grows from a dot to a
+# full star and back, and glows from deep red through orange to gold, like
+# Antares itself.
+
+STAR_FRAMES = ["·", "✢", "✳", "✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷", "✶", "✳", "✢"]
+STAR_COLOURS = ["38;5;160", "38;5;196", "38;5;202", "38;5;208", "38;5;214", "38;5;220", "38;5;221", "38;5;220", "38;5;214", "38;5;208", "38;5;202", "38;5;196"]
+
+to star_frame(i) = paint(STAR_FRAMES[i % len(STAR_FRAMES)], STAR_COLOURS[i % len(STAR_COLOURS)])
+
+# The waiting line is drawn once; after that only the star changes: each
+# turn moves the cursor up onto the line, to the star's column, writes the
+# next star and comes back, so the words never flicker. The cursor is hidden
+# meanwhile.
+
+to star_column() = len(indent()) + 3
+
+to spinner_start() {
+    show "{ESC}[?25l" + indent() + "  " + star_frame(0) + " " + paint(SPIN_LABEL + "…", "38;5;209") + dim("  " + SETTINGS.model_id)
+}
+
+to spinner_turn(i) {
+    show "{ESC}[1A{ESC}[{star_column()}G" + star_frame(i)
+}
+
+# Clears the waiting line and shows the cursor again.
+to spinner_stop() {
+    show "{ESC}[?25h{ESC}[1A{ESC}[2K{ESC}[1A"
+}
+
+# The same, standing still (no colours, or output going to a file).
+to waiting_text() = indent() + dim("  ✻ {SPIN_LABEL}… ({SETTINGS.model_id})")
+
+# ---------- boxes ----------
+
+# How many characters fit across the terminal (found once).
+to term_width() {
+    when TERM_COLS > 0 { give TERM_COLS }
+    cols = 100
+    try {
+        when WINDOWS {
+            each l in lines(shell("mode con", {timeout: 5}).output) {
+                when has(l, "Columns:") {
+                    n = number_or_nothing(slice(l, find(l, ":") + 1))
+                    when n != nothing and n >= 20 { cols = n }
+                }
+            }
+        } else {
+            n = number_or_nothing(shell("tput cols", {timeout: 5}).output)
+            when n != nothing and n >= 20 { cols = n }
+        }
+    } else problem {
+        cols = 100
+    }
+    change TERM_COLS = cols
+    give cols
+}
+
+# A line in a box is made of parts, each [text, style] with style "brand",
+# "bold", "dim" or "" (plain).
+to row_text(row) = join(map(row, part => part[0]), "")
+
+to styled(t, style) {
+    when style == "brand" { give brand(t) }
+    when style == "bold" { give bold(t) }
+    when style == "dim" { give dim(t) }
+    give t
+}
+
+# The row made to fit `width`, shortening its longest part in the middle
+# (a long folder keeps its start and its end).
+to fit_row(row, width) {
+    over = len(row_text(row)) - width
+    when over <= 0 { give row }
+    longest = 0
+    each i in range(len(row)) {
+        when len(row[i][0]) > len(row[longest][0]) { longest = i }
+    }
+    t = row[longest][0]
+    keep = len(t) - over - 1
+    when keep < 2 { give [[slice(row_text(row), 0, max(width - 1, 0)) + "…", ""]] }
+    head = floor(keep / 2)
+    out = row
+    out[longest] = [slice(t, 0, head) + "…" + slice(t, len(t) - (keep - head)), row[longest][1]]
+    give out
+}
+
+# Rows in a rounded box, as wide as the longest (but no wider than the
+# terminal), with the right edge lined up.
+to draw_box(rows) {
+    inner = 20
+    each r in rows { inner = max(inner, len(row_text(r))) }
+    inner = min(inner, term_width() - 5)
+    show brand("╭" + repeat_text("─", inner + 2) + "╮")
+    each r in rows {
+        f = fit_row(r, inner)
+        body = join(map(f, part => styled(part[0], part[1])), "")
+        show brand("│ ") + body + repeat_text(" ", inner - len(row_text(f))) + brand(" │")
+    }
+    show brand("╰" + repeat_text("─", inner + 2) + "╯")
+}

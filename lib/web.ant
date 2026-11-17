@@ -1,0 +1,100 @@
+# Antares Code: searching the web (through DuckDuckGo's plain HTML page,
+# which needs no key).
+
+SEARCH_URL = "https://html.duckduckgo.com/html/"
+
+# The text between `start` and `until` in s, after the first `start`, or "".
+to between(s, start, until) {
+    at = find(s, start)
+    when at < 0 { give "" }
+    rest = slice(s, at + len(start))
+    end = find(rest, until)
+    when end < 0 { give "" }
+    give slice(rest, 0, end)
+}
+
+# HTML with its tags taken out and its common entities turned back into
+# characters.
+to plain(html) {
+    out = ""
+    inside = no
+    each ch in split(html, "") {
+        when ch == "<" {
+            inside = yes
+        } else when ch == ">" {
+            inside = no
+        } else when not inside {
+            out += ch
+        }
+    }
+    each pair in [["&amp;", "&"], ["&quot;", "\""], ["&#x27;", "'"], ["&#39;", "'"], ["&lt;", "<"], ["&gt;", ">"], ["&nbsp;", " "]] {
+        out = replace(out, pair[0], pair[1])
+    }
+    give trim(replace(out, "\n", " "))
+}
+
+HEX = "0123456789abcdef"
+
+# A web address with its %XX escapes turned back into characters (the plain
+# ones; others stay as they are, which still works as an address).
+to url_decode(s) {
+    out = ""
+    i = 0
+    while i < len(s) {
+        ch = s[i]
+        when ch == "%" and i + 2 < len(s) {
+            hi = find(HEX, lower(s[i + 1]))
+            lo = find(HEX, lower(s[i + 2]))
+            when hi >= 0 and lo >= 0 and hi < 8 {
+                out += char(hi * 16 + lo)
+                i += 3
+                skip
+            }
+        }
+        out += ch
+        i += 1
+    }
+    give out
+}
+
+# The results on a DuckDuckGo results page: {title, url, snippet}.
+to search_results(html) {
+    found = []
+    parts = split(html, "class=\"result__a\"")
+    each k in range(len(parts)) {
+        when k == 0 { skip }
+        part = parts[k]
+        href = between(part, "href=\"", "\"")
+        title = plain(between(part, ">", "</a>"))
+        raw = between(part, "class=\"result__snippet\"", "</a>")
+        snippet = plain(slice(raw, find(raw, ">") + 1))
+        when has(href, "uddg=") { href = url_decode(between(href + "&", "uddg=", "&")) }
+        when begins(href, "//") { href = "https:" + href }
+        # adverts go through a tracking address: leave them out
+        when has(href, "duckduckgo.com/y.js") or href == "" { skip }
+        found = push(found, {title: title, url: href, snippet: snippet})
+    }
+    give found
+}
+
+to tool_web_search(a) {
+    query = text(a.query)
+    wanted = floor(clip(arg(a, "count", 6), 1, 10))
+    tool_header("Web Search", "\"" + one_line(query, 80) + "\"")
+    html = fetch(SEARCH_URL, {query: {q: query}, timeout: 30})
+    results = search_results(html)
+    when len(results) == 0 {
+        result_line("no results")
+        give "No results for \"{query}\". Try other words."
+    }
+    results = slice(results, 0, min(wanted, len(results)))
+    result_line("{len(results)} results")
+    out = []
+    n = 0
+    each r in results {
+        n += 1
+        detail(dim("{n}. {one_line(r.title, 90)}"))
+        out = push(out, "{n}. {r.title}\n   {r.url}\n   {r.snippet}")
+    }
+    give join(out, "\n") + "\n\n(Read a page with fetch_url.)"
+}

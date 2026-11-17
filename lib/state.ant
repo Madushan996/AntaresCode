@@ -1,0 +1,64 @@
+# Antares Code: everything the program remembers while it runs.
+# Every file shares these globals; functions change them with `change`.
+
+APP_NAME = "Antares Code"
+APP_VERSION = "2.1.0"
+HOME = program_folder()      # the program itself (can be shared)
+WINDOWS = env("OS") == "Windows_NT"
+
+# Your own settings, keys, sessions and memory: in .antares-code in your
+# user folder, not with the program, so the program can be shared safely.
+to user_data_folder() {
+    h = env("USERPROFILE")
+    when h == nothing or trim(h) == "" { h = env("HOME") }
+    when h == nothing or trim(h) == "" { give HOME + "/data" }
+    give replace(trim(h), "\\", "/") + "/.antares-code"
+}
+DATA_DIR = user_data_folder()
+CR = char(13)               # a carriage return (Antares has no \r escape)
+
+# settings kept between runs, in settings.json next to the program
+SETTINGS = {
+    model_id: "nvidia/nemotron-3-ultra-550b-a55b",
+    mode: "yolo",           # yolo (never ask, work autonomously) | edits | ask
+    thinking: no,           # show the model's reasoning
+    max_tokens: 32768,      # the longest reply allowed (thinking counts too)
+    temperature: 0.2,
+    timeout: 300,           # seconds to wait for a reply
+    compact_at: 60000,      # tokens of conversation before it is summarised
+    color: yes,
+    memory: yes,            # remember you and your projects between sessions
+    check_updates: yes,     # say once a day if a new version is out
+}
+
+DEFAULT_SETTINGS = SETTINGS  # kept as they are here, for /reset
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing}   # API keys, by service
+WORKDIR = "."
+MESSAGES = []               # the conversation, in the OpenAI chat format
+TODOS = []                  # the model's task list
+ALWAYS = []                 # what the user allowed for the rest of the session
+USAGE = {input: 0, output: 0, calls: 0}
+MODEL_LIST = []             # the chat models NVIDIA offers, once fetched
+HAS_RG = no                 # ripgrep is installed: faster search
+IN_GIT = no
+MAX_STEPS = 200             # tool rounds allowed in one turn
+PRINT_MODE = no             # -p: answer one prompt and exit
+RUN_ONLY = {}               # settings changed for this run only, with their saved values
+TURN = 0                    # how many requests the user has made
+CHECKPOINTS = []            # files as they were before each change: {turn, path, before}
+PROCESSES = []              # programs started in the background: {id, pid, command, log}
+PLANNING = no               # plan mode: look around and plan, change nothing
+IN_TASK = no                # a helper agent (the task tool) is working
+TERM_COLS = 0               # the terminal's width, once found
+SPIN_LABEL = "Thinking"     # what the star says while waiting for a reply
+REMEMBERED_AT = 0           # the request up to which this session is remembered
+
+# Models that answered tool calls quickly and correctly when tested.
+RECOMMENDED = [
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "poolside/laguna-xs-2.1",
+    "mistralai/mistral-large-4-1t-a52b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+]

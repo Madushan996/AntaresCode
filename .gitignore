@@ -1,0 +1,33 @@
+# your NVIDIA API key: never share or commit it
+NVDIA.txt
+NVIDIA.txt
+nvidia_key.txt
+key.txt
+
+# what it remembers about you and your projects: personal
+memory/
+
+# per-computer state
+settings.json
+sessions/
+.processes/
+.request/
+.search_pattern
+.diff_before
+.diff_after
+tests/scratch/
+tests/.processes/
+tests/memory/
+tests/data/
+
+# made by build.ant (dist/acode.exe is the program to share)
+build/
+
+# acode.exe is published as a release, not kept in the repository
+dist/
+
+# keys, wherever they might end up
+keys.json
+
+# the old name (NV Code), kept only on the computer that used it
+nvcode.bat

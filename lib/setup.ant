@@ -1,0 +1,381 @@
+# Antares Code: setting it up. The first time it runs (or with /setup), a
+# welcome screen takes a new user through four short steps: connecting an AI
+# service (with the key's page opened in the browser, and the key checked),
+# choosing a model, choosing how it works, and memory. Keys are kept in your
+# own settings folder. It
+# also moves settings, sessions and memory there from the program's folder,
+# where earlier versions kept them, so the program can be shared safely.
+
+to migrate_old_data() {
+    make_folder(DATA_DIR)
+    moved = []
+    old_settings = HOME + "/settings.json"
+    when exists(old_settings) {
+        when not exists(DATA_DIR + "/settings.json") { write(DATA_DIR + "/settings.json", read(old_settings)) }
+        when exists(DATA_DIR + "/settings.json") {
+            delete(old_settings)
+            moved = push(moved, "settings")
+        }
+    }
+    each sub in ["sessions", "memory"] {
+        old = HOME + "/" + sub
+        when exists(old) and is_folder(old) {
+            make_folder(DATA_DIR + "/" + sub)
+            each f in files(old) {
+                src = old + "/" + f
+                dst = DATA_DIR + "/" + sub + "/" + f
+                when not is_folder(src) {
+                    when not exists(dst) { write(dst, read(src)) }
+                    when exists(dst) { delete(src) }
+                }
+            }
+            when len(files(old)) == 0 {
+                when WINDOWS { shell("rmdir \"" + native(old) + "\"") } else { shell("rmdir \"" + old + "\"") }
+            }
+            moved = push(moved, sub)
+        }
+    }
+    # (before the settings are read, so no colours yet)
+    when len(moved) > 0 { show "  (Moved your " + join(moved, " and ") + " to {DATA_DIR}, so the program's folder can be shared without them.)" }
+}
+
+# The model to start with for a service: a recommended one it offers.
+to default_model(p, ids) {
+    picks = suggested_models(p, ids)
+    when len(picks) > 0 { give picks[0] }
+    give nothing
+}
+
+# Up to two good models from a service's list, the best first.
+to suggested_models(p, ids) {
+    out = []
+    when p == "nvidia" {
+        each id in RECOMMENDED {
+            when has(ids, id) and len(out) < 2 { out = push(out, id) }
+        }
+    } else when p == "openrouter" {
+        each f in OPENROUTER_FAVOURITES {
+            each id in ids {
+                when has(lower(id), f) and not has(out, id) and len(out) < 2 { out = push(out, id) }
+            }
+        }
+    } else {
+        # the newest plain Flash (quick), then the newest Pro (thinks harder)
+        best_flash = nothing
+        best_pro = nothing
+        each id in ids {
+            v = gemini_version(id)
+            when v != nothing and ends(id, "-flash") and (best_flash == nothing or v > gemini_version(best_flash)) { best_flash = id }
+            when v != nothing and ends(id, "-pro") and (best_pro == nothing or v > gemini_version(best_pro)) { best_pro = id }
+        }
+        when best_flash == nothing and has(ids, "gemini-flash-latest") { best_flash = "gemini-flash-latest" }
+        when has(ids, "gemini-pro-latest") { best_pro = "gemini-pro-latest" }
+        when best_flash != nothing { out = push(out, best_flash) }
+        when best_pro != nothing { out = push(out, best_pro) }
+    }
+    when len(out) == 0 and len(ids) > 0 { out = [ids[0]] }
+    give out
+}
+
+# ---------- the welcome screen ----------
+
+# What each service is, for someone choosing, and how to get its key.
+WELCOME = [
+    {p: "gemini", about: "Google's Gemini models, with a generous free tier", get: "Sign in with a Google account and choose Create API key"},
+    {p: "openrouter", about: "free models from many makers (NVIDIA, Google, Cohere…), with one key", get: "Sign in (Google or GitHub works) and choose Create API Key"},
+    {p: "nvidia", about: "NVIDIA's own hosted models, free for developers", get: "Sign in, open any model, and choose Get API Key"},
+]
+
+to step_title(n, total, title) {
+    show ""
+    show "  " + brand("Step {n} of {total}") + dim("  ·  ") + bold(title)
+    show "  " + dim(repeat_text("─", 60))
+}
+
+# Opens a web page in the browser.
+to open_page(url) {
+    when WINDOWS {
+        shell("start \"\" \"" + url + "\"")
+    } else when env("OSTYPE") != nothing and has(env("OSTYPE"), "darwin") {
+        shell("open \"" + url + "\"")
+    } else {
+        shell("xdg-open \"" + url + "\" >/dev/null 2>&1")
+    }
+}
+
+# Reads an answer; nothing means the input ended.
+to answer_to(question) {
+    a = input(question)
+    when a == nothing { give nothing }
+    give trim(replace(a, char(65279), ""))
+}
+
+# Connects one service: shows how to get a key, opens the page if wanted,
+# and checks the key. Gives the service's models, or nothing.
+to connect(w) {
+    info = PROVIDERS[w.p]
+    show ""
+    show "  " + brand("✻ ") + bold(info.name) + dim("  " + w.about)
+    when has_key(w.p) { show "    " + green("✓ connected") + dim("  ({masked(KEYS[w.p])}; press Enter to keep it)") }
+    show "    " + dim("1.") + " Open " + bold(info.site)
+    show "    " + dim("2.") + " " + w.get
+    show "    " + dim("3.") + " Copy the key, come back here, and paste it"
+    opened = no
+    tries = 0
+    while tries < 4 {
+        tries += 1
+        prompt = "    Paste your key, or press Enter to open the page › "
+        when opened or has_key(w.p) { prompt = "    Paste your key (Enter to skip) › " }
+        answer = answer_to(brand(prompt))
+        when answer == nothing { give nothing }
+        when answer == "" {
+            when opened or has_key(w.p) or tries > 2 { give nothing }
+            open_page(info.site)
+            show dim("    (Opened {info.site} in your browser.)")
+            opened = yes
+            skip
+        }
+        when len(filter(info.starts, st => begins(answer, st))) == 0 { show yellow("    That doesn't look like a {info.name} key (they start with " + join(info.starts, " or ") + "); checking it anyway.") }
+        show dim("    Checking it with {info.name}…")
+        c = check_key(w.p, answer)
+        erase_line()
+        when c.ok {
+            save_key(w.p, answer)
+            show "    " + green("✓ Connected.") + dim(" {c.count} models you can use.")
+            give c.models
+        }
+        show "    " + red("✗ That key didn't work: {c.problem}.") + dim(" Check you copied all of it, and paste it again.")
+    }
+    give nothing
+}
+
+# The welcome screen: services and keys, a model, how it works, memory.
+# Gives yes if at least one service is connected at the end.
+to run_setup(first) {
+    when SETTINGS.color { clear() }
+    total = 4
+    if_new = "Welcome to Antares Code"
+    when not first { if_new = "Antares Code setup" }
+    show ""
+    gap = repeat_text(" ", 24)
+    draw_box([
+        [[gap + "     ·      ✦      ·", "brand"]],
+        [[gap + "  ✶        ", "brand"], ["✻", "bold"], ["        ✶", "brand"]],
+        [[gap + "     ·      ✦      ·", "brand"]],
+        [],
+        [["✻ ", "brand"], [if_new, "bold"]],
+        [],
+        [["This program was created by ", ""], ["Madushan Dissanayake", "bold"], [" with the help of", ""]],
+        [["Claude AI, using Madushan's own programming language called ", ""], ["\"Antares\"", "brand"], [".", ""]],
+        [],
+        [["It's a coding agent in your terminal: tell it what you want in plain words,", "dim"]],
+        [["and it reads your code, edits files, runs commands and checks its work.", "dim"]],
+        [],
+        [["Setting it up takes about two minutes, in four short steps.", "dim"]],
+    ])
+
+    # ---- 1. services
+    step_title(1, total, "Connect an AI service")
+    show "  Antares Code needs at least one of these. All three have free models:"
+    show ""
+    each i in range(len(WELCOME)) {
+        w = WELCOME[i]
+        mark = "  "
+        when has_key(w.p) { mark = green("✓ ") }
+        show "   " + mark + brand("{i + 1}") + "  " + bold(pad(PROVIDERS[w.p].name, 12)) + dim(w.about)
+    }
+    show ""
+    connected_any = len(filter(PROVIDER_ORDER, p => has_key(p))) > 0
+    hint = "Type a number, or several like 1 2 (Enter: 1)"
+    when connected_any { hint = "Type numbers to connect or change (Enter: keep what's connected)" }
+    answer = answer_to(brand("  {hint} › "))
+    when answer == nothing { give connected_any }
+    chosen = []
+    each word in split(replace(answer, ",", " ")) {
+        n = number_or_nothing(word)
+        when n != nothing and n >= 1 and n <= len(WELCOME) and n == floor(n) and not has(chosen, n) { chosen = push(chosen, n) }
+    }
+    when len(chosen) == 0 and not connected_any { chosen = [1] }
+    models = {}
+    each n in chosen {
+        got = connect(WELCOME[n - 1])
+        when got != nothing { models[WELCOME[n - 1].p] = got }
+    }
+    when len(filter(PROVIDER_ORDER, p => has_key(p))) == 0 {
+        show ""
+        show red("  No service is connected yet, so Antares Code can't talk to a model.")
+        show "  Get a key from one of the pages above, then start Antares Code again (or type /setup)."
+        give no
+    }
+
+    # ---- 2. a model
+    step_title(2, total, "Choose a model")
+    options = []
+    each w in WELCOME {
+        when has_key(w.p) {
+            ids = []
+            when has(models, w.p) {
+                ids = models[w.p]
+            } else {
+                try { ids = provider_models(w.p, KEYS[w.p]) } else problem { ids = [] }
+            }
+            each id in suggested_models(w.p, ids) { options = push(options, id) }
+        }
+    }
+    current = SETTINGS.model_id
+    # the model in use, if it isn't among them
+    when has_key(provider_of(current)) and not has(options, current) { options = push(options, current) }
+    when len(options) > 0 {
+        show "  These are quick and good at coding. You can switch any time with /model."
+        show ""
+        each i in range(len(options)) {
+            id = options[i]
+            note = ""
+            when i == 0 { note = green("  recommended") }
+            when provider_of(id) == "gemini" and has(lower(id), "pro") { note += dim("  thinks harder; few free requests") }
+            when id == current { note += dim("  (in use)") }
+            show "   " + brand("{i + 1}") + "  " + pad(id, 46) + dim(provider_name(provider_of(id))) + note
+        }
+        show ""
+        answer = answer_to(brand("  Type a number (Enter: 1) › "))
+        pick = options[0]
+        when answer != nothing and answer != "" {
+            n = number_or_nothing(answer)
+            when n != nothing and n >= 1 and n <= len(options) and n == floor(n) { pick = options[n - 1] }
+        }
+        set_setting("model_id", pick)
+        show "  " + green("✓ ") + "Using " + bold(pick)
+    }
+    change MODEL_LIST = []
+
+    # ---- 3. how it works
+    step_title(3, total, "How should it work?")
+    modes = [
+        ["yolo", "On its own", "edits files and runs commands without asking, until the job is done (recommended)"],
+        ["edits", "Ask before commands", "edits files freely, asks before running anything"],
+        ["ask", "Ask before every change", "you approve each edit and command"],
+    ]
+    each i in range(len(modes)) {
+        m = modes[i]
+        now_note = ""
+        when SETTINGS.mode == m[0] { now_note = dim("  (now)") }
+        show "   " + brand("{i + 1}") + "  " + bold(pad(m[1], 26)) + dim(m[2]) + now_note
+    }
+    show ""
+    show dim("  Whichever you choose, /undo takes back its file changes, and /plan lets you approve a plan first.")
+    answer = answer_to(brand("  Type a number (Enter: 1) › "))
+    mode = "yolo"
+    when answer != nothing and answer != "" {
+        n = number_or_nothing(answer)
+        when n != nothing and n >= 1 and n <= 3 and n == floor(n) { mode = modes[n - 1][0] }
+    }
+    set_setting("mode", mode)
+    show "  " + green("✓ ") + "Mode: " + bold(mode)
+
+    # ---- 4. memory
+    step_title(4, total, "Remember things between sessions?")
+    show "  It can keep short notes about you (your name, preferences you tell it)"
+    show "  and about each project (what was done last), so you needn't repeat yourself."
+    show dim("  The notes stay on this computer, cost very little, and /memory shows them.")
+    answer = answer_to(brand("  Remember between sessions? (Y/n) › "))
+    on = answer == nothing or not begins(lower(answer), "n")
+    set_setting("memory", on)
+    when on { show "  " + green("✓ ") + "Memory on" } else { show "  " + green("✓ ") + "Memory off" + dim(" (/memory on turns it on)") }
+
+    # ---- ready
+    show ""
+    draw_box([
+        [["✓ ", "brand"], ["You're all set", "bold"]],
+        [],
+        [["Type what you want, in plain words, for example:", ""]],
+        [["  fix the failing test in test_app.py", "brand"]],
+        [["  add a dark mode to the settings page", "brand"]],
+        [],
+        [["@file   ", "bold"], ["include a file in your message   ", "dim"], ["/plan   ", "bold"], ["plan first, then do it", "dim"]],
+        [["/undo   ", "bold"], ["take back the last changes       ", "dim"], ["/model  ", "bold"], ["switch model", "dim"]],
+        [["/help   ", "bold"], ["everything else                  ", "dim"], ["/setup  ", "bold"], ["this screen again", "dim"]],
+    ])
+    show dim("  Your keys and settings are kept in {DATA_DIR}.")
+    when first {
+        answer_to(brand("  Press Enter to start › "))
+    }
+    give yes
+}
+
+to show_keys() {
+    show ""
+    each p in PROVIDER_ORDER {
+        k = KEYS[p]
+        state = dim("not set")
+        when k != nothing { state = green("set") + dim("  " + masked(k)) }
+        show "  " + bold(pad(provider_name(p), 12)) + state
+    }
+    show dim("  Kept in {keys_file()} (or from NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY). /setup changes them.")
+    show ""
+}
+
+# ---------- starting again ----------
+
+to remove_folder(p) {
+    when exists(p) {
+        when WINDOWS { shell("rmdir /s /q \"" + native(p) + "\"") } else { shell("rm -rf \"" + p + "\"") }
+    }
+}
+
+# Forgets the keys and settings (and, with `everything`, the memory and
+# saved conversations too). Gives what went.
+to reset_data(everything) {
+    gone = []
+    each f in [keys_file(), DATA_DIR + "/settings.json"] {
+        when exists(f) { delete(f) }
+    }
+    gone = push(gone, "your API keys")
+    gone = push(gone, "your settings")
+    change KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing}
+    change SETTINGS = DEFAULT_SETTINGS
+    change RUN_ONLY = {}
+    change ALWAYS = []
+    change MODEL_LIST = []
+    when everything {
+        remove_folder(memory_folder())
+        remove_folder(DATA_DIR + "/sessions")
+        change REMEMBERED_AT = TURN
+        gone = push(gone, "what it remembers about you and your projects")
+        gone = push(gone, "your saved conversations")
+    }
+    give gone
+}
+
+# /reset [all]: after you say yes, starts again from the welcome screen.
+# Gives "exit" if no service was set up again (nothing to talk to).
+to command_reset(rest) {
+    everything = lower(trim(rest)) == "all"
+    show ""
+    show bold("  Start again from the beginning?")
+    show "  This removes your API keys and settings, then shows the welcome screen."
+    when everything {
+        show "  " + yellow("It also erases what it remembers about you and your projects, and your saved conversations.")
+    } else {
+        show dim("  Your saved conversations and memory are kept (/reset all erases those too).")
+    }
+    show dim("  Project notes (ANTARES.md in your projects) are never touched.")
+    answer = input(brand("  Type yes to reset, or press Enter to keep everything › "))
+    when answer == nothing or lower(trim(answer)) != "yes" {
+        show dim("  Nothing was changed.")
+        give nothing
+    }
+    gone = reset_data(everything)
+    said = gone[len(gone) - 1]
+    when len(gone) > 1 { said = join(slice(gone, 0, len(gone) - 1), ", ") + " and " + said }
+    show green("  ✓ Removed " + said + ".")
+    # keys set in the environment come back by themselves
+    load_keys()
+    from_env = filter(PROVIDER_ORDER, p => has_key(p))
+    when len(from_env) > 0 {
+        show yellow("  (A key for " + join(map(from_env, p => provider_name(p)), " and ") + " is set in an environment variable, so it stays; remove the variable to reset it too.)")
+    }
+    when not run_setup(yes) { give "exit" }
+    start_conversation()
+    banner()
+    give nothing
+}

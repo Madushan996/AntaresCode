@@ -1,0 +1,442 @@
+# Antares Code: the agent loop. The model answers, calls tools, sees what they
+# gave back, and carries on until it has finished the task.
+
+# Project notes, read at the start of every session: the first that exists.
+# (NVCODE.md is this program's old name for them.)
+MEMORY_FILES = ["ANTARES.md", "NVCODE.md", "AGENTS.md", "CLAUDE.md"]
+
+# Where notes are written: the project's notes file, or a new ANTARES.md.
+to notes_file() {
+    m = project_memory()
+    when m != nothing { give WORKDIR + "/" + m.name }
+    give WORKDIR + "/ANTARES.md"
+}
+
+# Adds a line to the project's notes.
+to add_note(note) {
+    p = notes_file()
+    snapshot(p)
+    when not exists(p) { write(p, "# Notes for Antares Code\n\nRead at the start of every session.\n\n") }
+    old = read(p)
+    when old != "" and not ends(old, "\n") { append(p, "\n") }
+    append(p, "- " + trim(replace(note, "\n", " ")) + "\n")
+    refresh_system_prompt()
+    give rel(p)
+}
+
+to tool_remember(a) {
+    note = text(a.note)
+    about = lower(text(arg(a, "about", "project")))
+    tool_header("Remember", one_line(note, 90))
+    when about == "you" or about == "user" {
+        when add_user_note(note) {
+            result_line(green("Saved about you") + dim(" (for every project)"))
+            give "Saved; it will be known in every project from now on."
+        }
+        result_line(dim("already known"))
+        give "That was already known."
+    }
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    where = add_note(note)
+    result_line(green("Saved in {where}"))
+    give "Saved in {where}; it will be read at the start of every session."
+}
+
+to project_memory() {
+    each name in MEMORY_FILES {
+        p = WORKDIR + "/" + name
+        when exists(p) { give {name: name, body: squeeze(read(p), 8000)} }
+    }
+    give nothing
+}
+
+# Whether the project is written in Antares: .ant files in the working
+# folder or the folders just inside it.
+to uses_antares() {
+    try {
+        each n in files(WORKDIR) {
+            when ends(lower(n), ".ant") { give yes }
+        }
+        each n in files(WORKDIR) {
+            sub = WORKDIR + "/" + n
+            when not begins(n, ".") and is_folder(sub) {
+                each m in files(sub) {
+                    when ends(lower(m), ".ant") { give yes }
+                }
+            }
+        }
+    } else problem {
+        give no
+    }
+    give no
+}
+
+# The guide is part of the program (lib/guide.ant, made from
+# lib/antares_guide.md by build.ant), so acode.exe needs no other files.
+# Next to the program, the .md is read instead, so edits to it count at once.
+to antares_guide() {
+    p = HOME + "/lib/antares_guide.md"
+    when exists(p) { give read(p) }
+    give GUIDE
+}
+
+# How independently the model works: on its own in yolo mode, checking in
+# with the user otherwise.
+to working_style() {
+    when SETTINGS.mode == "yolo" {
+        give "- Work autonomously, from start to finish. Nobody approves your tool calls and the user isn't watching each step, so don't stop to ask for permission or confirmation, and don't ask questions you can answer by looking at the code or trying things.
+- When details are left open, make sensible, conventional choices and carry on; list the assumptions you made in your final answer.
+- Keep going until the task is completely done and checked: when a test, build or run fails, find out why, fix it and run it again. Don't end your turn with work half done, or with a plan instead of the work.
+- Stop and ask only when the request is so unclear that guessing would likely waste a lot of work, or when the next step would destroy data or reach outside the project (deleting files the user didn't mention, force pushes, installing software system-wide)."
+    }
+    give "- The user may refuse a tool call. Then don't repeat it: ask what they would like instead, or find another way.
+- If something is unclear and you can't find out from the code, ask the user a short question instead of guessing."
+}
+
+# Brings the instructions up to date (after the mode changes, say).
+to refresh_system_prompt() {
+    when len(MESSAGES) > 0 and MESSAGES[0].role == "system" {
+        msgs = MESSAGES
+        msgs[0] = {role: "system", content: system_prompt()}
+        change MESSAGES = msgs
+    }
+}
+
+to system_prompt() {
+    d = now()
+    shell_name = "sh"
+    when WINDOWS { shell_name = "cmd.exe on Windows (use Windows commands, such as dir, type and copy, or PowerShell through: powershell -Command ...)" }
+    git_note = "no"
+    when IN_GIT { git_note = "yes" }
+    p = "You are {APP_NAME}, an expert software engineer working as a coding agent in the user's terminal. You help with programming tasks: writing code, fixing bugs, explaining code, refactoring, running tests and builds, and using git.
+
+Environment:
+- Working folder: {WORKDIR}
+- Shell for run_command: {shell_name}
+- Git repository: {git_note}
+- Today: {d.year}-{pad(d.month, 2, "right", "0")}-{pad(d.day, 2, "right", "0")}
+
+How to work:
+- Look before you change anything: use list_files, find_files, search and read_file to understand the code and its conventions first. Never guess at a file's contents.
+- Change existing files with edit_file, copying old_string exactly from what read_file showed (without the line numbers). Use write_file only for new files or complete rewrites.
+- Match the style, libraries and patterns the project already uses. Don't add comments that only repeat the code.
+- After changing code, check your work: run the tests, the build, or the program with run_command, and fix what fails.
+- For a task with several steps, keep a task list with todo_write, and update it as you finish each step.
+- Several changes to one file: multi_edit, in one go. Rename or move files with move_file, and delete with delete_file (only files you made, or that the user asked to delete).
+- For documentation, error messages, library versions or anything you may not know well: web_search, then fetch_url to read a page.
+- To explore a large codebase or answer a question that takes many searches, hand it to a helper with task; it reports back, and your conversation stays short.
+- A server, watcher or game that keeps running: start it with start_process, check it with process_output (and fetch_url or run_command against it), and stop it with stop_process when finished.
+- Memory: when the user asks you to remember something, or you learn something lasting about them (their name, skills, the languages, tools or style they prefer), save it with remember (about: you for the user, project for this project). One short line each; never secrets.
+- Never run destructive commands (deleting files or folders, git reset --hard, force pushes) unless the user asked for exactly that. Don't commit or push unless asked.
+- A program that keeps running (a server, a game window, a watcher) never finishes by itself: run it with a short timeout (5 to 10 seconds) just to check that it starts without errors.
+{working_style()}
+
+How to answer:
+- Be brief and direct. Use Markdown sparingly: short paragraphs, bullet points, and code blocks for code.
+- When you have finished, say in a sentence or two what you changed and how you checked it. Mention any file by its path, as path:line where useful.
+- Don't repeat large pieces of code that you have already written to files."
+    when uses_antares() {
+        p += "\n\nThis project is written in Antares (.ant files). Unless the user asks for another language, write new programs in Antares too, following the guide below, and run them with: antares file.ant\n\n" + antares_guide()
+    }
+    memory = project_memory()
+    when memory != nothing {
+        p += "\n\nProject notes, from {memory.name} in the working folder (follow them):\n" + memory.body
+    }
+    you = user_memory()
+    when you != "" {
+        p += "\n\nWhat you know about the user from earlier sessions (use it quietly; don't repeat it back):\n" + you
+    }
+    others = other_projects()
+    when others != "" {
+        p += "\n\nThe user's other projects, from earlier sessions (folder · date · what was done):\n" + others
+    }
+    give p
+}
+
+to start_conversation() {
+    change MESSAGES = [{role: "system", content: system_prompt()}]
+    change TODOS = []
+}
+
+# A rough count of the tokens in the conversation (about 4 characters each).
+to conversation_tokens() = floor(len(to_json(MESSAGES)) / 4)
+
+to add_usage(r) {
+    u = USAGE
+    u.calls += 1
+    when has(r, "usage") and r.usage != nothing {
+        u.input += arg(r.usage, "prompt_tokens", 0)
+        u.output += arg(r.usage, "completion_tokens", 0)
+    }
+    change USAGE = u
+}
+
+# Replaces the conversation with a summary of it, to make room.
+to compact(note) {
+    show dim("  ✻ Summarising the conversation to make room…")
+    change SPIN_LABEL = "Summarising"
+    asked = push(MESSAGES, {role: "user", content: "Summarise our conversation so far so that you can carry on the work from the summary alone. Include: what the user asked for, decisions made, files read or changed (with paths), commands run and their results, problems found, the current state, and what is left to do. " + note})
+    try {
+        r = nv_chat(asked, no)
+        change SPIN_LABEL = "Thinking"
+        add_usage(r)
+        summary = arg(r.choices[0].message, "content", "")
+        when trim(summary) == "" { fail("the model gave an empty summary") }
+        change MESSAGES = [
+            {role: "system", content: system_prompt()},
+            {role: "user", content: "This is a summary of our conversation so far:\n\n" + summary},
+            {role: "assistant", content: "Thanks, I have the context and will carry on from here."},
+        ]
+        erase_line()
+        show dim("  ✻ Conversation summarised: now about {conversation_tokens()} tokens")
+        give yes
+    } else problem {
+        change SPIN_LABEL = "Thinking"
+        show red("  Couldn't summarise: " + explain_problem(problem))
+        give no
+    }
+}
+
+to session_path() {
+    name = lower(WORKDIR)
+    each ch in [":", "/", "\\", " ", "."] { name = replace(name, ch, "_") }
+    give DATA_DIR + "/sessions/" + name + ".json"
+}
+
+to save_session() {
+    try {
+        make_folder(DATA_DIR + "/sessions")
+        save({workdir: WORKDIR, model_id: SETTINGS.model_id, messages: MESSAGES, todos: TODOS}, session_path())
+    } else problem {
+        # a session that can't be saved shouldn't stop the work
+        nothing
+    }
+}
+
+# The tool calls in a reply, made safe to read.
+to calls_of(msg) {
+    when not has(msg, "tool_calls") or msg.tool_calls == nothing { give [] }
+    give msg.tool_calls
+}
+
+# The inputs of a tool call, as a map.
+to inputs_of(call) {
+    raw = arg(call.function, "arguments", "")
+    when kind(raw) == "map" { give raw }
+    when kind(raw) != "text" or trim(raw) == "" { give {} }
+    try {
+        parsed = json(raw)
+        when kind(parsed) == "map" { give parsed }
+        give {}
+    } else problem {
+        give nothing
+    }
+}
+
+# One turn: the user's message, then as many model replies and tool calls
+# as it takes. Gives yes if it finished normally.
+to agent_turn(user_text) {
+    change TURN = TURN + 1
+    when conversation_tokens() > SETTINGS.compact_at { compact("") }
+    before = len(MESSAGES)
+    change MESSAGES = push(MESSAGES, {role: "user", content: user_text})
+    steps = 0
+    cut_offs = 0
+    while yes {
+        steps += 1
+        when steps > MAX_STEPS {
+            show yellow("  Stopped after {MAX_STEPS} rounds of tools. Say \"continue\" to let it carry on.")
+            give no
+        }
+        t0 = clock()
+        r = nothing
+        tools = yes
+        when PLANNING { tools = read_only_specs() }
+        try {
+            r = nv_chat(MESSAGES, tools)
+        } else problem {
+            show red("  " + explain_problem(problem))
+            when steps == 1 {
+                # nothing happened yet: forget the message, so that the next
+                # one isn't taken as carrying on with it
+                change MESSAGES = slice(MESSAGES, 0, before)
+                show dim("  Your message wasn't kept. Send it again, or try another model with /model.")
+            } else {
+                save_session()
+                show dim("  The work so far is kept: say \"continue\" to carry on.")
+            }
+            give no
+        }
+        took = clock() - t0
+        add_usage(r)
+        when not has(r, "choices") or len(r.choices) == 0 {
+            show red("  The service sent back no answer: " + one_line(to_json(r), 300))
+            give no
+        }
+        choice = r.choices[0]
+        msg = choice.message
+        content = arg(msg, "content", "")
+        reasoning = arg(msg, "reasoning_content", arg(msg, "reasoning", ""))
+        calls = calls_of(msg)
+        when kind(reasoning) == "text" and trim(reasoning) != "" {
+            when SETTINGS.thinking {
+                show dim("  ✻ Thinking ({fixed(took, 1)} s):")
+                each l in lines(trim(reasoning)) { show dim("    " + l) }
+            } else {
+                show dim("  ✻ Thought for {fixed(took, 1)} s")
+            }
+        }
+        when kind(content) == "text" and trim(content) != "" {
+            show ""
+            when len(calls) == 0 {
+                render(trim(content))
+            } else {
+                show dim(trim(content))
+            }
+        }
+        reply = {role: "assistant", content: content}
+        when kind(content) != "text" { reply.content = "" }
+        # A reply cut off at the length limit: a tool call in it may be
+        # missing its end, so drop such calls and ask for smaller pieces.
+        was_cut = arg(choice, "finish_reason", "") == "length"
+        when was_cut {
+            cut_offs += 1
+            calls = filter(calls, c => inputs_of(c) != nothing)
+            when cut_offs > 3 {
+                show yellow("  The model's replies keep getting cut off at {SETTINGS.max_tokens} tokens. /max raises the limit; or ask for smaller steps.")
+                change MESSAGES = push(MESSAGES, reply)
+                save_session()
+                give no
+            }
+            show yellow("  (The reply was too long and got cut off; asking the model to carry on in smaller pieces.)")
+        }
+        when len(calls) > 0 { reply.tool_calls = calls }
+        change MESSAGES = push(MESSAGES, reply)
+        when len(calls) == 0 and not was_cut {
+            save_session()
+            give yes
+        }
+        n = 0
+        each call in calls {
+            n += 1
+            name = arg(call.function, "name", "?")
+            id = arg(call, "id", "call_{steps}_{n}")
+            a = inputs_of(call)
+            when a == nothing {
+                tool_header(name, "")
+                result_line(red("the model sent inputs that aren't valid JSON"))
+                result = "Error: the arguments were not valid JSON. Send them again as a JSON object."
+            } else {
+                result = run_tool(name, a)
+            }
+            change MESSAGES = push(MESSAGES, {role: "tool", tool_call_id: id, name: name, content: result})
+        }
+        when was_cut {
+            change MESSAGES = push(MESSAGES, {role: "user", content: "Your last reply was cut off because it reached the length limit ({SETTINGS.max_tokens} tokens), so anything unfinished in it was lost (finished tool calls were run). Carry on from where you were. Write long files in parts: create the file with write_file holding the first part (up to about 250 lines), then add the rest with append_file, one part at a time. Keep your thinking short."})
+        }
+    }
+}
+
+# One request, then how long it took and how many tokens it used.
+to timed_turn(user_text) {
+    t0 = clock()
+    before = USAGE
+    agent_turn(user_text)
+    took = clock() - t0
+    tokens_in = USAGE.input - before.input
+    tokens_out = USAGE.output - before.output
+    changed = len(filter(CHECKPOINTS, c => c.turn == TURN))
+    note = "✻ {fixed(took, 1)} s · {tokens_in} tokens in, {tokens_out} out"
+    when changed > 0 { note += " · {changed} file(s) changed (/diff, /undo)" }
+    show dim("  " + note)
+}
+
+# ---------- plan mode ----------
+
+PLAN_PROMPT = "Plan mode: don't change anything yet. Look at the code with the tools that read (read_file, list_files, find_files, search, web_search, fetch_url), then write a short, concrete plan for the task below: the files to change and how, in order, and how you'll check the result. End with the plan; the user will approve it before you start.\n\nThe task: "
+
+# Looks around and plans; the user approves the plan (or changes it) before
+# anything is changed.
+to plan_turn(task) {
+    change PLANNING = yes
+    agent_turn(PLAN_PROMPT + task)
+    change PLANNING = no
+    while yes {
+        show ""
+        answer = input(brand("  Go ahead with this plan?") + dim(" (y = yes, n = no, or say what to change) ") + brand("› "))
+        when answer == nothing { give nothing }
+        a = lower(trim(answer))
+        when a == "n" or a == "no" {
+            show dim("  Plan set aside; nothing was changed.")
+            give nothing
+        }
+        when a == "y" or a == "yes" or a == "" {
+            timed_turn("The plan is approved. Carry it out now, step by step, and check the result.")
+            give nothing
+        }
+        change PLANNING = yes
+        agent_turn("Change the plan: " + trim(answer) + "\nStill don't change anything; give the new plan.")
+        change PLANNING = no
+    }
+}
+
+# ---------- helper agents ----------
+
+to helper_prompt() {
+    give "You are a research helper for {APP_NAME}, a coding agent. Another agent gave you a job. Use the tools that read (read_file, list_files, find_files, search, web_search, fetch_url) to do it thoroughly, then give back a clear, complete report: what you found, with file paths and line numbers where they matter, and anything uncertain. You can't change files or run commands. The working folder is {WORKDIR}."
+}
+
+to tool_task(a) {
+    about = text(arg(a, "description", "a task"))
+    job = text(a.prompt)
+    tool_header("Task", one_line(about, 90))
+    when IN_TASK {
+        result_line(red("a helper can't start another helper"))
+        give "Error: a helper can't start another helper; do the job yourself."
+    }
+    change IN_TASK = yes
+    change SPIN_LABEL = "Researching"
+    msgs = [{role: "system", content: helper_prompt()}, {role: "user", content: job}]
+    report = nothing
+    steps = 0
+    while steps < 30 and report == nothing {
+        steps += 1
+        r = nothing
+        try {
+            r = nv_chat(msgs, read_only_specs())
+        } else problem {
+            change IN_TASK = no
+            change SPIN_LABEL = "Thinking"
+            fail("the helper couldn't reach the model: " + explain_problem(problem))
+        }
+        add_usage(r)
+        msg = r.choices[0].message
+        calls = calls_of(msg)
+        content = arg(msg, "content", "")
+        when kind(content) != "text" { content = "" }
+        when len(calls) == 0 {
+            report = content
+        } else {
+            msgs = push(msgs, {role: "assistant", content: content, tool_calls: calls})
+            n = 0
+            each call in calls {
+                n += 1
+                name = arg(call.function, "name", "?")
+                inputs = inputs_of(call)
+                result = "Error: the arguments were not valid JSON."
+                when not has(READ_ONLY, name) {
+                    result = "Error: a helper can only use " + join(READ_ONLY, ", ") + "."
+                } else when inputs != nothing {
+                    result = run_tool(name, inputs)
+                }
+                msgs = push(msgs, {role: "tool", tool_call_id: arg(call, "id", "h{steps}_{n}"), name: name, content: result})
+            }
+        }
+    }
+    change IN_TASK = no
+    change SPIN_LABEL = "Thinking"
+    when report == nothing { report = "The helper stopped after 30 rounds without finishing its report." }
+    result_line(green("Report ready") + dim(" ({steps} rounds)"))
+    give report
+}

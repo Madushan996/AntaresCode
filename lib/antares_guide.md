@@ -1,0 +1,55 @@
+ANTARES QUICK GUIDE. Antares is a small, new programming language; you have not seen it before, so follow this guide exactly instead of guessing from other languages. Run a program with: antares file.ant   (a problem stops it and names the line). Files end in .ant.
+
+SYNTAX
+- Comments: # to the end of the line. No semicolons. Blocks use { }. Strings use double quotes only.
+- Variables: x = 5. Numbers are floats (7 / 2 is 3.5; floor(7 / 2) is 3). Text: "hi". yes / no are the booleans. nothing is null.
+- Text interpolation: "score {score + 1}". A literal { in text must be written \{ (important for JSON). Escapes: \n \t \" \\ \{ only. There is NO \r escape: use char(13).
+- Lists: xs = [1, 2, 3]; xs[0]; len(xs); xs = push(xs, 4) (push gives a new list). Maps: p = {name: "Ada", age: 36}; p.age; p["age"]; p.age = 37; has(p, "age"); keys(p).
+- Values are copied, not shared: changing a list or map inside a function does not change the caller's copy.
+- Functions: to add(a, b) = a + b   or   to f(x) { ... give result }. Lambdas: x => x * 2. Pipelines: xs -> sort -> show_it.
+- Inside a function, x = ... always makes a LOCAL variable. To change a global, write: change score += 10   or   change player = p. change only works on a whole name, never change p.x: copy, edit, assign back (p = player; p.x += 1; change player = p).
+- Decisions: when x > 3 { ... } else when x > 1 { ... } else { ... }. when is a statement: it can't be used inside an expression or as a function argument (use a variable).
+- Loops: repeat 10 { }   repeat 10 as i { } (i = 1..10)   each item in xs { }   each i in range(5) { } (0..4)   while cond { }. stop = break, skip = continue.
+- Errors: try { ... } else problem { show problem }. fail("message") raises one. check(cond, "message").
+- Logic: and, or, not. Comparison: == != < <= > >=. Remainder: %. Power: ^.
+- Keywords that can't be names: and as ask by change descend each else give in learn model no not nothing or repeat show skip stop to try use using when while with xor yes. (So a map key called model must be written "model": ...)
+- Avoid naming variables after built-in functions (line, label, text, key, code, rect, fill, sound, files, read, write, find, range, max, min, top, sample, check, kind, wait, clear, path, picture, font, mix, ring, blend, shadow, glow, blur, canvas, measure, draw, camera, sun, sky, fog, lamp, cube, box, sphere, cone, plane, mesh, render...).
+- Several files: use "other" runs other.ant from the same folder; everything it defines is shared.
+
+BUILT-INS (common)
+show a, b (print) · input("prompt") · len · range(n) / range(a, b) · push · insert(list, i, x) · remove(list, i) · slice(x, a, b) · map(xs, f) · filter(xs, f) · reduce(xs, f, start) · sort · sort_by(xs, f) · reverse · join(xs, sep) · split(t, sep) · lines(t) · trim · upper · lower · replace(t, a, b) · find(x, item) (-1 if absent) · has · keys · values · unique · text(v) · number(t) · fixed(x, places) · pad(v, width) · abs · sqrt · floor · round · min(a, b) · max(a, b) · sin · cos · rand() (0..1) · randn · clock() (seconds) · now() · wait(seconds) · read(file) · write(file, text) · append(file, text) · exists(file) · files(folder) · save(value, file) / load(file) (JSON) · json(t) · to_json(v) · char(n) · code(t) · env(name) · args() · shell(command) · fetch(url) · read_page(url)
+
+GAMES IN A WINDOW (Windows)
+window(width, height, "Title") opens a window of that many game pixels, scaled to fit the screen. The game loop:
+    window(256, 192, "My game")
+    while window_open() {
+        when held("left") { x -= 2 }          # held: while the key is down (movement)
+        when pressed("space") { jump() }       # pressed: once per press (actions)
+        fill("skyblue")                         # clear the picture every frame
+        rect(x, y, 16, 16, "red")
+        label("Score {score}", 4, 4, "white")
+        frame()                                 # show it; waits so the game runs at 60 frames a second
+    }
+Drawing: fill([colour]) · rect(x, y, w, h [, colour [, corner_radius]]) · circle(x, y, r [, colour]) · ellipse(x, y, rx, ry [, colour]) · ring(x, y, r, thickness [, colour]) · polygon([[x, y], ...] [, colour]) · line(x1, y1, x2, y2 [, colour [, width]]) · path(points [, colour [, width]]) · pixel(x, y [, colour]) · label(text, x, y [, colour [, size]]) · sprite(rows, x, y, colours [, size]) · screenshot("shot.png"). Positions are pixels from the top-left and may have fractions (smooth movement); shapes have smooth edges. smooth(no) gives hard pixel-art edges.
+Colours: names (black white gray lightgray darkgray silver red maroon orange gold yellow olive lime green teal cyan skyblue blue navy purple magenta pink brown transparent), "#rrggbb", "#rrggbbaa", [r, g, b] or [r, g, b, alpha] with alpha 0 (see-through) to 1. hsl(hue 0-360, sat 0-1, light 0-1 [, alpha]) and mix(c1, c2, t) make colours. gradient(x1, y1, x2, y2, [colours]) and radial(x, y, r, [colours]) go anywhere a colour goes (sky: fill(gradient(0, 0, 0, H, ["skyblue", "navy"])); light: circle(x, y, r, radial(x, y, r, ["#ffd27f", "#ffd27f00"]))).
+Looking good (Antares 0.12+): blend("add") makes light add up (glows, fire, lasers), blend() goes back · shadow(dx, dy, softness) gives soft shadows to what follows, shadow() stops · font("Segoe UI", 24, "bold") makes labels smooth text of that pixel size (font() = pixel font); measure(text) gives {width, height} · glow(1), vignette(0.5), blur(r) affect the whole picture: call them last, just before frame() · fullscreen(yes/no) · dt = frame() gives seconds since the last frame (x += speed * dt).
+Pictures: img = picture("file.png") (read once; img.width, img.height) · draw(img, x, y [, {scale, width, height, angle (degrees), alpha, flip: yes, part: [x, y, w, h], tint, smooth: no}]) · p = picture(w, h) then canvas(p) draws on it until canvas(): draw static backgrounds once before the loop, then draw(p, 0, 0) each frame. colour_at(x, y). For modern-looking games use 640x360 to 960x540 with gradients, fonts and shadows; for retro games use 160x120 to 320x240 with sprites.
+Sprites: pixel art as rows of text, one character per pixel, with a map from characters to colours; other characters (use .) are see-through:
+    hero = [".rr.", "rrrr", ".bb.", ".b.b"]
+    sprite(hero, x, y, {r: "red", b: "blue"}, 2)     # 2 = twice as big
+3D (Antares 0.13+, Windows): describe the scene each frame, then render() draws it into the picture (2D drawn after goes on top):
+    camera(x, y, z, look_x, look_y, look_z)       # y is up; the ground is y = 0
+    sky("#4f86d9", "#d8e6f3")                     # background + soft sky light; sun(dx, dy, dz) for sunlight with soft shadows
+    plane(0, 0, 0, 60, 60, "#6f9a4f")             # shapes are placed by their middle
+    cube(x, 0.5, z, 1, {colour: "red", turn: angle})   # also box(x,y,z,w,h,d), sphere(x,y,z,r), cylinder(x,y,z,r,h), cone(x,y,z,r,h)
+    render()
+Looks: a colour or {colour, shine 0-1, metal 0-1, glow (light it gives off), picture, tiles, turn (degrees, or [x,y,z]), scale, shadow: no}. lamp(x, y, z, colour [, strength, reach]) each frame (up to 8); fog(colour, near, far); m = mesh("model.obj") or mesh(points, triangles) once, then draw(m, x, y, z, look); mesh(m, new_points) moves its corners each frame (0.13.1+: water, flags; points can be t([xs, ys, zs]) from tensor maths); {ripples: 1} on a shiny dark-blue surface looks like water (0.13.1+); to_screen(x, y, z) gives [sx, sy] for labels. For night: dark sky, sun(..., "#7f8fd8", 0.15) and lamps.
+Keys: "left" "right" "up" "down" "space" "enter" "escape" "backspace" "tab" "shift" "ctrl" "alt" "a".."z" "0".."9" "f1".."f12"; mouse() gives {x, y, left, right}.
+
+SOUND
+effect(name): "coin" "jump" "hit" "laser" "explosion" "powerup" "select" · beep(frequency, seconds [, wave]) · tune("C E G C5:2", 0.15) plays notes once · music("C - E - G - E -", 0.2, "triangle") loops a tune in the background; music() stops it · sound("file.wav" [, volume]) · volume(0..1) · silence(). Waves: "square" "sine" "triangle" "saw" "noise". Notes: A-G, then # or b, then octave 0-8 (default 4); - is a rest; :n lasts n steps.
+
+GOOD HABITS FOR ANTARES CODE
+- Keep game state in globals and update them with change inside functions, or keep the main loop at the top level.
+- Write and run in small steps: after each part, run antares file.ant (for a window game, check it starts; a problem prints the line number) and fix problems before adding more.
+- A game that opens a window keeps running until it is closed, so don't wait for it to finish with run_command: give it a short timeout to see whether it starts without a problem.

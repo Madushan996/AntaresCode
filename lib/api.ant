@@ -1,0 +1,336 @@
+# Antares Code: talking to the model services. NVIDIA (build.nvidia.com),
+# Google's Gemini (Google AI Studio) and OpenRouter (openrouter.ai) all speak
+# the OpenAI chat-completions format, so one set of code serves them all;
+# only the address and the key differ.
+#
+# Which service a model belongs to is told by its name: OpenRouter's end in
+# ":free" (only its free models are offered), NVIDIA's are "maker/model"
+# (nvidia/nemotron-..., mistralai/...), and Gemini's have no slash
+# (gemini-..., gemma-...).
+
+PROVIDERS = {
+    nvidia: {name: "NVIDIA", base: "https://integrate.api.nvidia.com/v1", site: "https://build.nvidia.com", env: ["NVIDIA_API_KEY"], starts: ["nvapi-"]},
+    gemini: {name: "Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", site: "https://aistudio.google.com/apikey", env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], starts: ["AIza", "AQ."]},
+    openrouter: {name: "OpenRouter", base: "https://openrouter.ai/api/v1", site: "https://openrouter.ai/keys", env: ["OPENROUTER_API_KEY"], starts: ["sk-or-"]},
+}
+PROVIDER_ORDER = ["nvidia", "gemini", "openrouter"]
+
+# OpenRouter's free models change; these are tried first, in this order.
+OPENROUTER_FAVOURITES = ["nemotron-3-ultra", "north-mini-code", "nemotron-3.5-super", "gemma-4-31b", "qwen", "deepseek", "gpt-oss", "llama", "nemotron"]
+
+# Words in a model's name that mark it as something other than a chat model.
+NOT_CHAT = ["embed", "safety", "guard", "clip", "detector", "retriev", "translate", "calibration", "reward", "starcoder", "parse", "ocr", "rerank", "imagen", "veo", "tts", "image", "aqa", "audio", "live", "robotics"]
+
+to provider_of(id) {
+    when ends(text(id), ":free") { give "openrouter" }
+    when has(text(id), "/") { give "nvidia" }
+    give "gemini"
+}
+to provider() = provider_of(SETTINGS.model_id)
+to provider_name(p) = PROVIDERS[p].name
+
+# ---------- keys ----------
+# Keys come from the environment (NVIDIA_API_KEY, GEMINI_API_KEY), or from
+# keys.json in your own settings folder (set up with /setup), never from the
+# program's folder, so sharing the program doesn't share them. (NVDIA.txt
+# next to the program, from earlier versions, is still read, and moved.)
+
+to keys_file() = DATA_DIR + "/keys.json"
+
+to load_keys() {
+    saved = {}
+    when exists(keys_file()) {
+        try { saved = load(keys_file()) } else problem { saved = {} }
+    }
+    found = {}
+    each p in PROVIDER_ORDER {
+        k = nothing
+        each name in PROVIDERS[p].env {
+            v = env(name)
+            when k == nothing and v != nothing and trim(v) != "" { k = trim(v) }
+        }
+        when k == nothing and has(saved, p) and kind(saved[p]) == "text" and trim(saved[p]) != "" { k = trim(saved[p]) }
+        found[p] = k
+    }
+    # the key file of earlier versions, next to the program
+    when found.nvidia == nothing {
+        each name in ["NVDIA.txt", "NVIDIA.txt", "nvidia_key.txt", "key.txt"] {
+            f = HOME + "/" + name
+            when found.nvidia == nothing and exists(f) {
+                words = filter(split(replace(replace(replace(read(f), CR, " "), "\n", " "), "\t", " ")), w => w != "")
+                each w in words {
+                    when found.nvidia == nothing and begins(w, "nvapi-") { found.nvidia = w }
+                }
+                when found.nvidia != nothing {
+                    save_key("nvidia", found.nvidia)
+                    show "  (Your NVIDIA key is now kept in {keys_file()}; you can delete {name}, and don't share it.)"
+                }
+            }
+        }
+    }
+    change KEYS = found
+}
+
+to save_key(p, k) {
+    saved = {}
+    when exists(keys_file()) {
+        try { saved = load(keys_file()) } else problem { saved = {} }
+    }
+    saved[p] = k
+    make_folder(DATA_DIR)
+    save(saved, keys_file())
+    ks = KEYS
+    ks[p] = k
+    change KEYS = ks
+}
+
+to has_key(p) = KEYS[p] != nothing
+
+# A key shown safely: its start and its last four characters.
+to masked(k) {
+    when k == nothing { give "not set" }
+    when len(k) < 12 { give "set" }
+    give slice(k, 0, 6) + "…" + slice(k, len(k) - 4)
+}
+
+to auth_headers_for(p) {
+    h = {Authorization: "Bearer " + KEYS[p], Accept: "application/json"}
+    # OpenRouter shows apps by name on its site
+    when p == "openrouter" { h["X-Title"] = "Antares Code" }
+    give h
+}
+
+# A problem from a service, in words that say what to do.
+to explain_problem(problem) {
+    name = provider_name(provider())
+    low = lower(problem)
+    when has(problem, "error 401") or has(problem, "error 403") or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") {
+        give "{name} didn't accept the API key. /setup enters it again."
+    } else when has(problem, "error 402") {
+        give "{name} says this needs credit. Antares Code offers only OpenRouter's free models: pick one with /model."
+    } else when has(problem, "error 404") {
+        give "The model {SETTINGS.model_id} isn't available right now. Pick another with /model."
+    } else when has(problem, "error 429") {
+        when provider() == "openrouter" { give "Too many requests: OpenRouter's free models allow about 20 requests a minute and 50 a day (1000 a day once you've added $10 of credit). Wait a while, or switch service with /model." }
+        give "Too many requests: {name}'s free tier is rate limited. Wait a moment and try again, or switch service with /model."
+    } else when has(low, "timed out") {
+        give "The model took longer than {SETTINGS.timeout} s to answer. It may be busy: try again, or pick another with /model."
+    } else when has(problem, "error 400") {
+        give "The model refused the request: {problem}\n(Some models don't support tools; /model lists ones that do.)"
+    }
+    give problem
+}
+
+# ---------- a request while the star twinkles ----------
+# Antares waits for a request to finish before doing anything else, so to
+# animate while the model thinks, the request runs on its own: curl is
+# started apart from this program (by Windows Script Host, which takes a
+# fraction of a second), writing the reply to a file, and the star is drawn
+# again every tenth of a second until the reply is there. The key goes to
+# curl in a file in your settings folder, deleted as soon as curl is done.
+
+to request_folder() = DATA_DIR + "/.request"
+
+# Sends `body` to the current service's chat API and gives the reply's
+# text, showing the waiting line meanwhile (and clearing it after).
+to post_chat(body) {
+    p = provider()
+    when not has_key(p) { fail("there is no {provider_name(p)} API key: /setup adds one") }
+    url = PROVIDERS[p].base + "/chat/completions"
+    name = provider_name(p)
+    when not SETTINGS.color or PRINT_MODE or not WINDOWS {
+        show waiting_text()
+        try {
+            reply = fetch(url, {headers: auth_headers_for(p), body: body, timeout: SETTINGS.timeout})
+        } else problem {
+            erase_line()
+            fail(problem)
+        }
+        erase_line()
+        give reply
+    }
+    dir = request_folder()
+    make_folder(dir)
+    files = {}
+    each f in ["body.json", "key.cfg", "reply.json", "code.txt", "errors.txt", "go.cmd", "go.js"] {
+        files[f] = native(dir + "/" + f)
+        when exists(files[f]) { delete(files[f]) }
+    }
+    write(files["body.json"], to_json(body))
+    extra = ""
+    when p == "openrouter" { extra = "header = \"X-Title: Antares Code\"\n" }
+    write(files["key.cfg"], "header = \"Authorization: Bearer {KEYS[p]}\"\nheader = \"Content-Type: application/json\"\nheader = \"Accept: application/json\"\n" + extra)
+    # in a .cmd file, % is written %%
+    curl = "@curl -s -S -X POST \"{url}\" -K \"{files["key.cfg"]}\" --data-binary \"@{files["body.json"]}\" -o \"{files["reply.json"]}\" -w \"%%\{http_code}\" --max-time {SETTINGS.timeout}"
+    write(files["go.cmd"], curl + " > \"{files["code.txt"]}\" 2> \"{files["errors.txt"]}\"" + CR + "\n@del \"{files["key.cfg"]}\"" + CR + "\n")
+    write(files["go.js"], "new ActiveXObject(\"WScript.Shell\").Run('\"" + replace(files["go.cmd"], "\\", "\\\\") + "\"', 0, false);\n")
+    started = clock()
+    frame = 0
+    spinner_start()
+    launched = shell("cscript //nologo \"" + files["go.js"] + "\"", {timeout: 30})
+    when launched.code != 0 {
+        spinner_stop()
+        when exists(files["key.cfg"]) { delete(files["key.cfg"]) }
+        fail("couldn't start the request: " + one_line(launched.output + " " + launched.errors, 200))
+    }
+    while not (exists(files["code.txt"]) and trim(read(files["code.txt"])) != "") {
+        wait(0.1)
+        frame += 1
+        spinner_turn(frame)
+        when clock() - started > SETTINGS.timeout + 20 {
+            spinner_stop()
+            fail("the request timed out after {SETTINGS.timeout} s")
+        }
+    }
+    spinner_stop()
+    when exists(files["key.cfg"]) { delete(files["key.cfg"]) }
+    code = trim(read(files["code.txt"]))
+    reply = ""
+    when exists(files["reply.json"]) { reply = read(files["reply.json"]) }
+    errors = ""
+    when exists(files["errors.txt"]) { errors = trim(read(files["errors.txt"])) }
+    # what was sent and received isn't kept
+    each f in ["body.json", "reply.json"] {
+        when exists(files[f]) { delete(files[f]) }
+    }
+    n = number_or_nothing(code)
+    when n == nothing or n == 0 {
+        when has(lower(errors), "timed out") { fail("the request timed out after {SETTINGS.timeout} s") }
+        fail("couldn't reach {name}: " + one_line(errors, 300))
+    }
+    when n >= 400 { fail("error {n} from {name}: " + one_line(reply, 500)) }
+    give reply
+}
+
+# Sends a chat request, trying again when the service is busy. `tools` is
+# yes (all of them), no (none) or a list of tool descriptions.
+to nv_chat(messages, tools) {
+    body = {"model": SETTINGS.model_id, messages: messages, max_tokens: SETTINGS.max_tokens, temperature: SETTINGS.temperature}
+    specs = []
+    when kind(tools) == "list" {
+        specs = tools
+    } else when tools == yes {
+        specs = TOOL_SPECS
+    }
+    when len(specs) > 0 {
+        body.tools = specs
+        body.tool_choice = "auto"
+    }
+    attempt = 0
+    while yes {
+        attempt += 1
+        try {
+            give json(post_chat(body))
+        } else problem {
+            # a model that won't give replies this long: ask for a shorter one
+            when has(problem, "error 400") and has(lower(problem), "max_tokens") and body.max_tokens > 8192 {
+                body.max_tokens = 8192
+                show dim("  (this model allows shorter replies; using 8192 tokens)")
+                skip
+            }
+            busy = has(problem, "error 429") or has(problem, "error 500") or has(problem, "error 502") or has(problem, "error 503") or has(problem, "error 504")
+            when not busy or attempt >= 3 { fail(problem) }
+            show dim("  (the service is busy; trying again in {attempt * 3} s)")
+            wait(attempt * 3)
+        }
+    }
+}
+
+to chat_model(id) {
+    low = lower(id)
+    when provider_of(id) == "gemini" and not (begins(low, "gemini") or begins(low, "gemma")) { give no }
+    give len(filter(NOT_CHAT, w => has(low, w))) == 0
+}
+
+# The chat models one service offers to a key, sorted. From OpenRouter, only
+# the free ones that can use tools.
+to provider_models(p, key) {
+    got = json(fetch(PROVIDERS[p].base + "/models", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}))
+    when p == "openrouter" {
+        free = []
+        each m in got.data {
+            price = arg(m, "pricing", {})
+            params = arg(m, "supported_parameters", [])
+            when params == nothing { params = [] }
+            when ends(m.id, ":free") and text(arg(price, "prompt", "1")) == "0" and text(arg(price, "completion", "1")) == "0" and has(params, "tools") { free = push(free, m.id) }
+        }
+        give sort(free)
+    }
+    ids = map(got.data, m => replace(text(m.id), "models/", ""))
+    give sort(filter(ids, id => provider_of(id) == p and chat_model(id)))
+}
+
+# The chat models of every service you have a key for: NVIDIA's, then
+# Gemini's. Fetched once per session; a service that can't be reached is
+# left out (and said so).
+to nv_models(refresh) {
+    when len(MODEL_LIST) > 0 and not refresh { give MODEL_LIST }
+    found = []
+    each p in PROVIDER_ORDER {
+        when has_key(p) {
+            try {
+                each id in provider_models(p, KEYS[p]) { found = push(found, id) }
+            } else problem {
+                show yellow("  Couldn't get {provider_name(p)}'s models: " + one_line(problem, 160))
+            }
+        }
+    }
+    when len(found) == 0 { fail("no service gave a list of models; check your keys with /setup") }
+    change MODEL_LIST = found
+    give found
+}
+
+# Whether a model was tested and found quick and good with tools. Gemini's
+# names change with each release, so its plain Flash and Pro models count;
+# for OpenRouter, the favourites among its free models.
+to recommended(id) {
+    when has(RECOMMENDED, id) { give yes }
+    low = lower(id)
+    when provider_of(id) == "openrouter" { give len(filter(slice(OPENROUTER_FAVOURITES, 0, 4), f => has(low, f))) > 0 }
+    when provider_of(id) == "gemini" {
+        give low == "gemini-flash-latest" or low == "gemini-pro-latest" or gemini_version(id) != nothing
+    }
+    give no
+}
+
+# The version of a plain Gemini Flash or Pro model ("gemini-3.8-flash" gives
+# 3.8), or nothing for the rest (previews, lite, audio, image and so on).
+to gemini_version(id) {
+    parts = split(lower(id), "-")
+    when len(parts) != 3 or parts[0] != "gemini" or not (parts[2] == "flash" or parts[2] == "pro") { give nothing }
+    give number_or_nothing(parts[1])
+}
+
+# A quick check that a model answers and can call a tool.
+to test_model(id) {
+    p = provider_of(id)
+    when not has_key(p) { give {ok: no, tools: no, seconds: 0, problem: "there is no {provider_name(p)} API key (/setup adds one)."} }
+    probe = [{type: "function", function: {name: "list_files", description: "Lists the files in a folder", parameters: {type: "object", properties: {path: {type: "string"}}, required: ["path"]}}}]
+    body = {"model": id, max_tokens: 512, tools: probe, messages: [{role: "user", content: "List the files in the folder src. Use your tool."}]}
+    t0 = clock()
+    try {
+        r = json(fetch(PROVIDERS[p].base + "/chat/completions", {headers: auth_headers_for(p), body: body, timeout: 45}))
+        msg = r.choices[0].message
+        tools_ok = has(msg, "tool_calls") and msg.tool_calls != nothing and len(msg.tool_calls) > 0
+        give {ok: yes, tools: tools_ok, seconds: clock() - t0, problem: ""}
+    } else problem {
+        why = explain_problem(problem)
+        when has(problem, "timed out") { why = "it didn't answer within 45 s (busy, or switched off for now)." }
+        give {ok: no, tools: no, seconds: clock() - t0, problem: why}
+    }
+}
+
+# Checks a key by asking its service for its models: {ok, count, problem}.
+# (OpenRouter's list is public, so its key is checked on its own first.)
+to check_key(p, key) {
+    try {
+        when p == "openrouter" { fetch(PROVIDERS[p].base + "/key", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}) }
+        ids = provider_models(p, key)
+        give {ok: yes, count: len(ids), models: ids, problem: ""}
+    } else problem {
+        why = one_line(problem, 200)
+        low = lower(problem)
+        when has(problem, "error 400") or has(problem, "error 401") or has(problem, "error 403") or has(low, "api key not valid") { why = "the service didn't accept it" }
+        give {ok: no, count: 0, models: [], problem: why}
+    }
+}

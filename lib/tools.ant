@@ -1,0 +1,590 @@
+# Antares Code: the tools the model can use, and asking the user first.
+
+to string_prop(about) = {type: "string", description: about}
+to number_prop(about) = {type: "number", description: about}
+to tool_spec(name, about, props, needed) = {type: "function", function: {name: name, description: about, parameters: {type: "object", properties: props, required: needed}}}
+
+TOOL_SPECS = [
+    tool_spec("read_file", "Reads a text file and gives its lines, numbered from 1. Read a file before editing it. For long files, read a part with offset and limit.",
+        {path: string_prop("The file, relative to the working folder or absolute"), offset: number_prop("The first line to read (from 1)"), limit: number_prop("How many lines to read (default 2000)")}, ["path"]),
+    tool_spec("write_file", "Creates a file, or replaces all of an existing one. Prefer edit_file for changing part of an existing file. For a long new file (over about 250 lines), write the first part here and add the rest with append_file.",
+        {path: string_prop("The file to write"), content: string_prop("The whole new content of the file")}, ["path", "content"]),
+    tool_spec("append_file", "Adds text to the end of a file (creating it if needed). Use it to write a long file in parts, after write_file made the first part.",
+        {path: string_prop("The file to add to"), content: string_prop("The text to add at the end")}, ["path", "content"]),
+    tool_spec("edit_file", "Replaces exact text in a file. old_string must appear exactly once (copy it exactly from read_file, without the line numbers) unless replace_all is true. Include enough surrounding lines to make it unique.",
+        {path: string_prop("The file to change"), old_string: string_prop("The exact text to replace"), new_string: string_prop("The text to put in its place"), replace_all: {type: "boolean", description: "Replace every occurrence (default false)"}}, ["path", "old_string", "new_string"]),
+    tool_spec("list_files", "Lists the files and folders in a folder (folders end with /).",
+        {path: string_prop("The folder (default: the working folder)")}, []),
+    tool_spec("find_files", "Finds files whose path matches a glob pattern, such as **/*.py, src/**/*.ts or *.\{js,ts}. Skips .git, node_modules and build folders.",
+        {pattern: string_prop("The glob pattern"), path: string_prop("The folder to look in (default: the working folder)")}, ["pattern"]),
+    tool_spec("search", "Searches the contents of files for a regular expression and gives matching lines as path:line:text.",
+        {pattern: string_prop("The regular expression to look for"), path: string_prop("The folder to search (default: the working folder)"), glob: string_prop("Only files matching this glob, such as *.py"), ignore_case: {type: "boolean", description: "Ignore upper and lower case"}}, ["pattern"]),
+    tool_spec("run_command", "Runs a shell command in the working folder and gives its output and exit code. Use it to run programs, tests, builds, git and package managers. Don't use it to read or edit files: use the file tools.",
+        {command: string_prop("The command"), timeout: number_prop("Seconds before it is stopped (default 120)")}, ["command"]),
+    tool_spec("fetch_url", "Fetches a web page and gives its readable text, for documentation and references.",
+        {url: string_prop("The web address")}, ["url"]),
+    tool_spec("todo_write", "Keeps a task list for work with several steps. Send the whole list each time, with each task's status. Keep exactly one task in_progress while working.",
+        {todos: {type: "array", description: "The whole task list", items: {type: "object", properties: {content: string_prop("The task"), status: {type: "string", enum: ["pending", "in_progress", "completed"]}}, required: ["content", "status"]}}}, ["todos"]),
+    tool_spec("multi_edit", "Makes several exact replacements in one file in one go, in order; either all of them happen or none. Each old_string must appear exactly once at that point (unless replace_all). Better than several edit_file calls on the same file.",
+        {path: string_prop("The file to change"), edits: {type: "array", description: "The replacements, in order", items: {type: "object", properties: {old_string: string_prop("The exact text to replace"), new_string: string_prop("The text to put in its place"), replace_all: {type: "boolean", description: "Replace every occurrence"}}, required: ["old_string", "new_string"]}}}, ["path", "edits"]),
+    tool_spec("delete_file", "Deletes a file. Only delete files you created, or that the user asked you to delete.",
+        {path: string_prop("The file to delete")}, ["path"]),
+    tool_spec("move_file", "Moves or renames a file (making folders as needed). Fails if the destination exists.",
+        {from_path: string_prop("The file to move"), to_path: string_prop("Where it goes")}, ["from_path", "to_path"]),
+    tool_spec("web_search", "Searches the web and gives the top results: title, address and a snippet. Use it for documentation, error messages and anything newer than you know; then read a page with fetch_url.",
+        {query: string_prop("What to search for"), count: number_prop("How many results (default 6, at most 10)")}, ["query"]),
+    tool_spec("ask_user", "Asks the user a question and waits for the answer. Only when the request is genuinely unclear and the choice matters; don't ask what you can find out yourself.",
+        {question: string_prop("The question"), options: {type: "array", description: "Answers to choose from, if there are obvious ones", items: {type: "string"}}}, ["question"]),
+    tool_spec("task", "Hands a self-contained research job to a helper agent with read-only tools (reading, finding and searching files, and the web); it works on its own and gives back a report. Use it to explore a large codebase or to answer a question that needs many searches, so your own conversation stays short.",
+        {description: string_prop("A few words saying what it is for"), prompt: string_prop("Everything the helper needs to know: the question, where to look, and what to report")}, ["description", "prompt"]),
+    tool_spec("remember", "Saves a lasting fact for future sessions: about this project (a command, a convention) in its notes, or about the user (their name, skills, the languages, tools and style they prefer) for every project. Use it when the user asks you to remember something, or when you learn something lasting about them. One short line; never secrets.",
+        {note: string_prop("The fact, in one short line"), about: {type: "string", enum: ["project", "you"], description: "project (the default), or you: a fact about the user, for every project"}}, ["note"]),
+    tool_spec("start_process", "Starts a program that keeps running (a web server, a watcher, a game) in the background and gives back its number at once. Read what it prints with process_output, and stop it with stop_process when done.",
+        {command: string_prop("The command")}, ["command"]),
+    tool_spec("process_output", "Gives the latest output of a program started with start_process, and whether it is still running.",
+        {id: number_prop("Its number"), lines: number_prop("How many of the last lines (default 60)")}, ["id"]),
+    tool_spec("stop_process", "Stops a program started with start_process, and everything it started.",
+        {id: number_prop("Its number")}, ["id"]),
+]
+
+# The tools that only look: a helper agent, and plan mode, get only these.
+READ_ONLY = ["read_file", "list_files", "find_files", "search", "fetch_url", "web_search"]
+to read_only_specs() = filter(TOOL_SPECS, t => has(READ_ONLY, t.function.name))
+
+# ---------- small helpers ----------
+
+# Which helpers this computer has: ripgrep for fast search, and git.
+to detect_tools() {
+    change HAS_RG = shell("rg --version", {timeout: 10}).code == 0
+    change IN_GIT = shell("git rev-parse --is-inside-work-tree", {folder: WORKDIR, timeout: 10}).output == "true"
+}
+
+
+to arg(a, name, default) {
+    when has(a, name) and a[name] != nothing { give a[name] }
+    give default
+}
+
+# A list a model sent, even when it sent it as JSON text (some do).
+to as_list(v, what) {
+    when v == nothing { give [] }
+    when kind(v) == "text" {
+        try {
+            v = json(v)
+        } else problem {
+            fail(what + " should be a list, not text that isn't JSON")
+        }
+    }
+    when kind(v) == "map" { give [v] }
+    give v
+}
+
+to full_path(p) {
+    q = replace(text(p), "\\", "/")
+    when q == "" or q == "." or q == "./" { give WORKDIR }
+    when begins(q, "/") or (len(q) > 1 and q[1] == ":") { give q }
+    when begins(q, "./") { q = slice(q, 2) }
+    give WORKDIR + "/" + q
+}
+
+to parent_of(p) {
+    q = replace(p, "\\", "/")
+    at = -1
+    each i in range(len(q)) {
+        when q[i] == "/" { at = i }
+    }
+    when at <= 0 { give "" }
+    give slice(q, 0, at)
+}
+
+to native(p) {
+    when WINDOWS { give replace(p, "/", "\\") }
+    give p
+}
+
+to is_folder(p) {
+    try {
+        files(p)
+        give yes
+    } else problem {
+        give no
+    }
+}
+
+to make_folder(p) {
+    when p == "" or exists(p) { give yes }
+    when WINDOWS { shell("mkdir \"" + native(p) + "\"") } else { shell("mkdir -p \"" + p + "\"") }
+    give exists(p)
+}
+
+# ---------- asking first ----------
+
+# Whether the user lets a tool go ahead: {ok, feedback}. `always_key` is
+# what "always" remembers, like "edit" or "command:npm".
+to permitted(kind, always_key, always_label) {
+    when SETTINGS.mode == "yolo" { give {ok: yes, feedback: ""} }
+    when kind == "edit" and SETTINGS.mode == "edits" { give {ok: yes, feedback: ""} }
+    when has(ALWAYS, always_key) { give {ok: yes, feedback: ""} }
+    when PRINT_MODE { give {ok: no, feedback: "This needs the user's permission, and no one is there to give it (run with --yolo to allow everything)."} }
+    show yellow("  Allow this?") + dim("  y = yes   a = yes, and {always_label} without asking   n = no (or type what to do instead)")
+    answer = input(brand("  › "))
+    when answer == nothing { give {ok: no, feedback: "The user didn't answer."} }
+    a = lower(trim(answer))
+    when a == "y" or a == "yes" or a == "" { give {ok: yes, feedback: ""} }
+    when a == "a" or a == "always" {
+        change ALWAYS = push(ALWAYS, always_key)
+        give {ok: yes, feedback: ""}
+    }
+    when a == "n" or a == "no" { give {ok: no, feedback: "The user said no. Ask them what to do instead, or try another way."} }
+    give {ok: no, feedback: "The user said no, and said: " + trim(answer)}
+}
+
+to refused(p) {
+    result_line(red("Not allowed"))
+    give p.feedback
+}
+
+# ---------- the tools ----------
+
+to tool_read(a) {
+    p = full_path(a.path)
+    first = floor(arg(a, "offset", 1))
+    count = floor(arg(a, "limit", 2000))
+    tool_header("Read", rel(p))
+    when not exists(p) { fail("there is no file " + rel(p)) }
+    when is_folder(p) { fail(rel(p) + " is a folder; use list_files") }
+    all = lines(read(p))
+    when first < 1 { first = 1 }
+    last = min(len(all), first + count - 1)
+    out = []
+    i = first
+    while i <= last {
+        l = all[i - 1]
+        when len(l) > 2000 { l = slice(l, 0, 2000) + " … [line cut]" }
+        out = push(out, pad(i, 6) + "  " + l)
+        i += 1
+    }
+    when len(all) == 0 {
+        result_line("Read an empty file")
+        give "(the file is empty)"
+    }
+    result_line("Read {last - first + 1} lines" + dim(" of {len(all)}"))
+    note = ""
+    when last < len(all) { note = "\n[{len(all) - last} more lines: read on with offset {last + 1}]" }
+    give join(out, "\n") + note
+}
+
+to tool_write(a) {
+    p = full_path(a.path)
+    body = text(a.content)
+    existed = exists(p)
+    tool_header("Write", rel(p))
+    n = len(lines(body))
+    when existed { result_line("Replaces the whole file with {n} lines") } else { result_line("Creates a new file with {n} lines") }
+    preview(body, 8)
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    when not make_folder(parent_of(p)) { fail("couldn't make the folder " + parent_of(p)) }
+    snapshot(p)
+    write(p, body)
+    result_line(green("Wrote {rel(p)}") + dim(" ({n} lines)"))
+    give "Wrote {rel(p)} ({n} lines)."
+}
+
+to tool_append(a) {
+    p = full_path(a.path)
+    body = text(a.content)
+    tool_header("Append", rel(p))
+    n = len(lines(body))
+    result_line("Adds {n} lines to the end")
+    preview(body, 6)
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    when not make_folder(parent_of(p)) { fail("couldn't make the folder " + parent_of(p)) }
+    snapshot(p)
+    # start the new part on a line of its own
+    when exists(p) {
+        old = read(p)
+        when old != "" and not ends(old, "\n") and not begins(body, "\n") { body = "\n" + body }
+    }
+    append(p, body)
+    total = len(lines(read(p)))
+    result_line(green("Added {n} lines to {rel(p)}") + dim(" (now {total} lines)"))
+    give "Added {n} lines to {rel(p)}; it now has {total} lines."
+}
+
+to tool_edit(a) {
+    p = full_path(a.path)
+    old = text(a.old_string)
+    new = text(a.new_string)
+    every = arg(a, "replace_all", no)
+    tool_header("Update", rel(p))
+    when not exists(p) { fail("there is no file " + rel(p) + "; use write_file to create it") }
+    content = read(p)
+    crlf = has(content, CR + "\n")
+    when crlf and not has(old, CR + "\n") and has(old, "\n") {
+        old = replace(old, "\n", CR + "\n")
+        new = replace(new, "\n", CR + "\n")
+    }
+    when old == "" { fail("old_string is empty; use write_file to create a file") }
+    found = count_of(content, old)
+    when found == 0 { fail("old_string was not found in {rel(p)}. Read the file again and copy the text exactly, including spaces and indentation.") }
+    when found > 1 and not every { fail("old_string appears {found} times in {rel(p)}. Include more surrounding lines to make it unique, or set replace_all.") }
+    show_diff(replace(old, CR, ""), replace(new, CR, ""), 12)
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    when every {
+        updated = replace(content, old, new)
+    } else {
+        at = find(content, old)
+        updated = slice(content, 0, at) + new + slice(content, at + len(old))
+    }
+    snapshot(p)
+    write(p, updated)
+    gone = len(lines(old))
+    added = len(lines(new))
+    result_line(green("Updated {rel(p)}") + dim(" ({found} place(s): {gone} lines out, {added} in)"))
+    give "Updated {rel(p)} ({found} replacement(s))."
+}
+
+to tool_list(a) {
+    p = full_path(arg(a, "path", "."))
+    tool_header("List", rel(p))
+    names = files(p)
+    out = []
+    folders = 0
+    each n in names {
+        when n == ".git" { skip }
+        when len(out) >= 400 { stop }
+        when is_folder(p + "/" + n) {
+            out = push(out, n + "/")
+            folders += 1
+        } else {
+            out = push(out, n)
+        }
+    }
+    result_line("{len(out) - folders} files, {folders} folders")
+    when len(out) == 0 { give "(empty folder)" }
+    give join(out, "\n")
+}
+
+SKIP_DIRS = ["node_modules/", ".git/", "target/", "__pycache__/", ".venv/", "venv/", "dist/", "build/", ".next/", ".idea/", ".vs/"]
+
+# Every file under a folder, as paths relative to it with / between parts.
+to all_files(dir) {
+    found = []
+    when HAS_RG {
+        found = lines(shell("rg --files --hidden -g \"!.git\"", {folder: dir, timeout: 60}).output)
+    } else when shell("git rev-parse --is-inside-work-tree", {folder: dir}).output == "true" {
+        found = lines(shell("git ls-files --cached --others --exclude-standard", {folder: dir, timeout: 60}).output)
+    } else when WINDOWS {
+        prefix = lower(native(dir)) + "\\"
+        each l in lines(shell("dir /s /b /a-d", {folder: dir, timeout: 60}).output) {
+            when begins(lower(l), prefix) { found = push(found, slice(l, len(prefix))) } else { found = push(found, l) }
+        }
+    } else {
+        found = map(lines(shell("find . -type f", {folder: dir, timeout: 60}).output), l => replace(l, "./", ""))
+    }
+    out = []
+    each f in found {
+        g = replace(f, "\\", "/")
+        when g == "" { skip }
+        when len(filter(SKIP_DIRS, d => begins(g, d) or has(g, "/" + d))) > 0 { skip }
+        out = push(out, g)
+    }
+    give out
+}
+
+# Glob matching: * (not across /), ** (across /), ? and {a,b}.
+to glob_variants(pat) {
+    open_at = find(pat, "\{")
+    when open_at < 0 { give [pat] }
+    close_at = find(pat, "}")
+    when close_at < open_at { give [pat] }
+    head = slice(pat, 0, open_at)
+    tail = slice(pat, close_at + 1)
+    out = []
+    each choice in split(slice(pat, open_at + 1, close_at), ",") {
+        each v in glob_variants(head + choice + tail) { out = push(out, v) }
+    }
+    give out
+}
+
+to glob_at(p, i, s, j) {
+    while i < len(p) {
+        c = p[i]
+        when c == "*" {
+            double = i + 1 < len(p) and p[i + 1] == "*"
+            next_i = i + 1
+            when double {
+                next_i = i + 2
+                when next_i < len(p) and p[next_i] == "/" {
+                    when glob_at(p, next_i + 1, s, j) { give yes }
+                }
+            }
+            k = j
+            while k <= len(s) {
+                when glob_at(p, next_i, s, k) { give yes }
+                when k < len(s) and s[k] == "/" and not double { give no }
+                k += 1
+            }
+            give no
+        }
+        when j >= len(s) { give no }
+        when c == "?" {
+            when s[j] == "/" { give no }
+        } else when c != s[j] {
+            give no
+        }
+        i += 1
+        j += 1
+    }
+    give j == len(s)
+}
+
+to glob_match(pat, path) {
+    p = pat
+    s = path
+    when WINDOWS {
+        p = lower(p)
+        s = lower(s)
+    }
+    when not has(p, "/") {
+        parts = split(s, "/")
+        s = parts[len(parts) - 1]
+    }
+    each v in glob_variants(p) {
+        when glob_at(v, 0, s, 0) { give yes }
+    }
+    give no
+}
+
+to tool_find(a) {
+    dir = full_path(arg(a, "path", "."))
+    pat = replace(a.pattern, "\\", "/")
+    when begins(pat, "./") { pat = slice(pat, 2) }
+    tool_header("Find", pat)
+    hits = filter(all_files(dir), f => glob_match(pat, f))
+    result_line("{len(hits)} file(s)")
+    when len(hits) == 0 { give "No files match {pat}." }
+    when len(hits) > 300 { give join(slice(hits, 0, 300), "\n") + "\n[{len(hits) - 300} more]" }
+    give join(hits, "\n")
+}
+
+to tool_search(a) {
+    dir = full_path(arg(a, "path", "."))
+    pat = text(a.pattern)
+    glob = arg(a, "glob", nothing)
+    icase = arg(a, "ignore_case", no)
+    where = ""
+    when glob != nothing { where = " in " + glob }
+    tool_header("Search", "\"" + one_line(pat, 60) + "\"" + where)
+    make_folder(DATA_DIR)
+    pattern_file = DATA_DIR + "/.search_pattern"
+    write(pattern_file, pat)
+    pf = "\"" + native(pattern_file) + "\""
+    when HAS_RG {
+        cmd = "rg -n --no-heading --color never --hidden -g \"!.git\""
+        when icase { cmd += " -i" }
+        when glob != nothing { cmd += " -g \"" + glob + "\"" }
+        cmd += " -f " + pf + " ."
+    } else when IN_GIT {
+        cmd = "git grep -n -I --untracked"
+        when icase { cmd += " -i" }
+        cmd += " -f " + pf
+        when glob != nothing { cmd += " -- \"" + glob + "\"" }
+    } else when WINDOWS {
+        cmd = "findstr /s /n /r"
+        when icase { cmd += " /i" }
+        target = "*.*"
+        when glob != nothing { target = glob }
+        cmd += " /g:" + pf + " " + target
+    } else {
+        cmd = "grep -rnI"
+        when icase { cmd += " -i" }
+        when glob != nothing { cmd += " --include=\"" + glob + "\"" }
+        cmd += " -f " + pf + " ."
+    }
+    r = shell(cmd, {folder: dir, timeout: 60})
+    hits = filter(lines(r.output), l => trim(l) != "")
+    result_line("{len(hits)} matching line(s)")
+    when len(hits) == 0 {
+        when r.errors != "" and r.code > 1 { give "The search failed: " + r.errors }
+        give "No matches."
+    }
+    shown = map(slice(hits, 0, min(len(hits), 250)), l => one_line(l, 400))
+    more = ""
+    when len(hits) > 250 { more = "\n[{len(hits) - 250} more matches: narrow the search]" }
+    give join(shown, "\n") + more
+}
+
+to tool_bash(a) {
+    cmd = text(a.command)
+    seconds = arg(a, "timeout", 120)
+    tool_header("Bash", one_line(cmd, 120))
+    words = split(trim(cmd))
+    first_word = "command"
+    when len(words) > 0 { first_word = words[0] }
+    ok = permitted("command", "command:" + first_word, "run " + first_word + " commands")
+    when not ok.ok { give refused(ok) }
+    r = shell(cmd, {folder: WORKDIR, timeout: seconds})
+    out = r.output
+    when r.errors != "" {
+        when out != "" { out += "\n" }
+        out += r.errors
+    }
+    when r.code == 0 { result_line(dim("exit code 0")) } else { result_line(red("exit code {r.code}")) }
+    when out != "" { preview(out, 6) }
+    give squeeze(out, 30000) + "\n[exit code {r.code}]"
+}
+
+to tool_fetch(a) {
+    url = text(a.url)
+    tool_header("Fetch", url)
+    page = read_page(url)
+    result_line("{len(page)} characters")
+    give squeeze(page, 20000)
+}
+
+to tool_todos(a) {
+    items = as_list(arg(a, "todos", []), "todos")
+    change TODOS = items
+    tool_header("Update Todos", "")
+    each t in items {
+        status = arg(t, "status", "pending")
+        task = arg(t, "content", "")
+        when status == "completed" {
+            detail(dim("☒ " + task))
+        } else when status == "in_progress" {
+            detail(bold("◐ " + task))
+        } else {
+            detail("☐ " + task)
+        }
+    }
+    give "The task list is updated. Carry on with the work."
+}
+
+to tool_multi_edit(a) {
+    p = full_path(a.path)
+    edits = as_list(arg(a, "edits", []), "edits")
+    tool_header("Update", rel(p) + dim(" ({len(edits)} changes)"))
+    when not exists(p) { fail("there is no file " + rel(p) + "; use write_file to create it") }
+    when len(edits) == 0 { fail("there are no edits") }
+    content = read(p)
+    crlf = has(content, CR + "\n")
+    updated = content
+    n = 0
+    each e in edits {
+        n += 1
+        old = text(arg(e, "old_string", ""))
+        new = text(arg(e, "new_string", ""))
+        when crlf and not has(old, CR + "\n") and has(old, "\n") {
+            old = replace(old, "\n", CR + "\n")
+            new = replace(new, "\n", CR + "\n")
+        }
+        when old == "" { fail("edit {n}: old_string is empty") }
+        found = count_of(updated, old)
+        when found == 0 { fail("edit {n}: old_string was not found (after the edits before it). Nothing was changed. Read the file again and copy the text exactly.") }
+        every = arg(e, "replace_all", no)
+        when found > 1 and not every { fail("edit {n}: old_string appears {found} times. Nothing was changed. Include more surrounding lines, or set replace_all.") }
+        show_diff(replace(old, CR, ""), replace(new, CR, ""), 4)
+        when every {
+            updated = replace(updated, old, new)
+        } else {
+            at = find(updated, old)
+            updated = slice(updated, 0, at) + new + slice(updated, at + len(old))
+        }
+    }
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    snapshot(p)
+    write(p, updated)
+    result_line(green("Updated {rel(p)}") + dim(" ({len(edits)} changes)"))
+    give "Updated {rel(p)} with {len(edits)} changes."
+}
+
+to tool_delete(a) {
+    p = full_path(a.path)
+    tool_header("Delete", rel(p))
+    when not exists(p) { fail("there is no file " + rel(p)) }
+    when is_folder(p) { fail(rel(p) + " is a folder; delete_file deletes files") }
+    ok = permitted("command", "delete", "delete files")
+    when not ok.ok { give refused(ok) }
+    snapshot(p)
+    delete(p)
+    result_line(green("Deleted {rel(p)}") + dim(" (/undo brings it back)"))
+    give "Deleted {rel(p)}."
+}
+
+to tool_move(a) {
+    from = full_path(a.from_path)
+    to_p = full_path(a.to_path)
+    tool_header("Move", rel(from) + " → " + rel(to_p))
+    when not exists(from) { fail("there is no file " + rel(from)) }
+    when is_folder(from) { fail(rel(from) + " is a folder; move_file moves files (use run_command for folders)") }
+    when exists(to_p) { fail(rel(to_p) + " already exists") }
+    ok = permitted("edit", "edit", "edit files")
+    when not ok.ok { give refused(ok) }
+    when not make_folder(parent_of(to_p)) { fail("couldn't make the folder " + parent_of(to_p)) }
+    snapshot(from)
+    snapshot(to_p)
+    cmd = "mv \"" + from + "\" \"" + to_p + "\""
+    when WINDOWS { cmd = "move /y \"" + native(from) + "\" \"" + native(to_p) + "\"" }
+    r = shell(cmd)
+    when not exists(to_p) { fail("couldn't move it: " + one_line(r.output + " " + r.errors, 200)) }
+    result_line(green("Moved to {rel(to_p)}"))
+    give "Moved {rel(from)} to {rel(to_p)}."
+}
+
+to tool_ask(a) {
+    question = text(a.question)
+    options = as_list(arg(a, "options", []), "options")
+    tool_header("Question", "")
+    when PRINT_MODE {
+        result_line(dim("no one to answer"))
+        give "No one is there to answer. Make a sensible choice, carry on, and say what you chose."
+    }
+    show "     " + bold(question)
+    each i in range(len(options)) {
+        show "     " + brand("{i + 1}.") + " " + options[i]
+    }
+    hint = "type your answer"
+    when len(options) > 0 { hint = "type a number, or your own answer" }
+    answer = input(brand("  › ") + dim(""))
+    when answer == nothing or trim(answer) == "" { give "The user didn't answer. Make a sensible choice and say what you chose." }
+    n = number_or_nothing(answer)
+    when n != nothing and n >= 1 and n <= len(options) and n == floor(n) { answer = options[n - 1] }
+    give "The user answered: " + trim(answer)
+}
+
+# Runs one tool call, and gives the text that goes back to the model.
+to run_tool(name, a) {
+    try {
+        when name == "read_file" { give tool_read(a) }
+        when name == "write_file" { give tool_write(a) }
+        when name == "edit_file" { give tool_edit(a) }
+        when name == "append_file" { give tool_append(a) }
+        when name == "list_files" { give tool_list(a) }
+        when name == "find_files" { give tool_find(a) }
+        when name == "search" { give tool_search(a) }
+        when name == "run_command" { give tool_bash(a) }
+        when name == "fetch_url" { give tool_fetch(a) }
+        when name == "todo_write" { give tool_todos(a) }
+        when name == "multi_edit" { give tool_multi_edit(a) }
+        when name == "delete_file" { give tool_delete(a) }
+        when name == "move_file" { give tool_move(a) }
+        when name == "web_search" { give tool_web_search(a) }
+        when name == "ask_user" { give tool_ask(a) }
+        when name == "task" { give tool_task(a) }
+        when name == "remember" { give tool_remember(a) }
+        when name == "start_process" { give tool_start_process(a) }
+        when name == "process_output" { give tool_process_output(a) }
+        when name == "stop_process" { give tool_stop_process(a) }
+        tool_header(name, "")
+        result_line(red("there is no such tool"))
+        give "Error: there is no tool called {name}. The tools are: " + join(map(TOOL_SPECS, t => t.function.name), ", ") + "."
+    } else problem {
+        result_line(red(one_line(problem, 200)))
+        give "Error: " + problem
+    }
+}

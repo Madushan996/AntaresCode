@@ -1,0 +1,258 @@
+# Checks Antares Code's tools without calling the model service.
+#   antares tests/check.ant
+
+use "../lib/state"
+use "../lib/guide"
+use "../lib/ui"
+use "../lib/api"
+use "../lib/tools"
+use "../lib/web"
+use "../lib/processes"
+use "../lib/history"
+use "../lib/memory"
+use "../lib/setup"
+use "../lib/update"
+use "../lib/agent"
+use "../lib/commands"
+
+s = SETTINGS
+s.color = no
+s.mode = "yolo"
+SETTINGS = s
+# the tests keep their own settings folder, away from yours
+DATA_DIR = replace(HOME, "\\", "/") + "/data"
+
+# a scratch project to work in
+base = replace(HOME, "\\", "/") + "/scratch"
+when exists(base) {
+    when WINDOWS { shell("rmdir /s /q \"" + native(base) + "\"") } else { shell("rm -rf \"" + base + "\"") }
+}
+make_folder(base + "/src/util")
+WORKDIR = base
+write(base + "/src/main.py", "def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n")
+write(base + "/src/util/helpers.js", "export const twice = n => n * 2\n")
+write(base + "/README.md", "# Scratch\n")
+write(base + "/notes.txt", "line one{CR}\nline two{CR}\n")
+detect = shell("rg --version").code == 0
+HAS_RG = detect
+
+# glob matching
+check(glob_match("*.py", "src/main.py"), "*.py matches by name")
+check(glob_match("src/**/*.js", "src/util/helpers.js"), "** crosses folders")
+check(glob_match("**/*.md", "README.md"), "**/ matches at the top too")
+check(not glob_match("src/*.js", "src/util/helpers.js"), "* doesn't cross folders")
+check(glob_match("*.\{js,py}", "src/main.py") and glob_match("*.\{js,py}", "a/b.js"), "braces")
+check(glob_match("ma?n.py", "main.py"), "?")
+
+# paths
+check(full_path("src/main.py") == base + "/src/main.py", "relative paths")
+check(full_path("./src") == base + "/src", "./ paths")
+check(full_path("C:/x/y") == "C:/x/y" and full_path("/x") == "/x", "absolute paths")
+check(rel(base + "/src/main.py") == "src/main.py", "rel")
+check(parent_of(base + "/a/b.txt") == base + "/a", "parent_of")
+
+# reading
+r = run_tool("read_file", {path: "src/main.py"})
+check(has(r, "     1  def add(a, b):") and has(r, "     4  print(add(2, 3))"), "read_file numbers lines: {r}")
+r = run_tool("read_file", {path: "src/main.py", offset: 2, limit: 1})
+check(has(r, "     2      return a + b") and not has(r, "def add") and has(r, "offset 3"), "read_file with offset and limit")
+check(begins(run_tool("read_file", {path: "nope.py"}), "Error: there is no file"), "read_file of a missing file")
+
+# editing
+r = run_tool("edit_file", {path: "src/main.py", old_string: "return a + b", new_string: "return a + b  # sum"})
+check(has(read(base + "/src/main.py"), "return a + b  # sum"), "edit_file: {r}")
+check(has(run_tool("edit_file", {path: "src/main.py", old_string: "not there", new_string: "x"}), "was not found"), "edit_file reports missing text")
+write(base + "/twice.txt", "a\na\n")
+check(has(run_tool("edit_file", {path: "twice.txt", old_string: "a", new_string: "b"}), "appears 2 times"), "edit_file reports repeats")
+run_tool("edit_file", {path: "twice.txt", old_string: "a", new_string: "b", replace_all: yes})
+check(read(base + "/twice.txt") == "b\nb\n", "edit_file replace_all")
+run_tool("edit_file", {path: "notes.txt", old_string: "line one\nline two", new_string: "first\nsecond"})
+check(read(base + "/notes.txt") == "first{CR}\nsecond{CR}\n", "edit_file keeps Windows line endings")
+
+# writing, into a new folder
+run_tool("write_file", {path: "deep/new/file.txt", content: "hello\n"})
+check(read(base + "/deep/new/file.txt") == "hello\n", "write_file makes folders")
+
+# listing, finding, searching
+r = run_tool("list_files", {})
+check(has(r, "src/") and has(r, "README.md"), "list_files: {r}")
+r = run_tool("find_files", {pattern: "**/*.js"})
+check(has(r, "src/util/helpers.js") and not has(r, "main.py"), "find_files: {r}")
+r = run_tool("search", {pattern: "twice", glob: "*.js"})
+check(has(r, "helpers.js") and has(r, "twice"), "search: {r}")
+HAS_RG = no
+r = run_tool("search", {pattern: "add\\(", ignore_case: yes})
+check(has(r, "main.py"), "search without ripgrep: {r}")
+r = run_tool("find_files", {pattern: "*.py"})
+check(has(r, "src/main.py"), "find_files without ripgrep: {r}")
+check(run_tool("search", {pattern: "zzz_nothing_zzz"}) == "No matches.", "search with no matches")
+HAS_RG = detect
+
+# commands
+r = run_tool("run_command", {command: "echo hi"})
+check(has(r, "hi") and has(r, "[exit code 0]"), "run_command: {r}")
+check(has(run_tool("run_command", {command: "exit 3"}), "[exit code 3]"), "run_command exit codes")
+
+# asking first, with no one to answer
+s = SETTINGS
+s.mode = "ask"
+SETTINGS = s
+PRINT_MODE = yes
+check(has(run_tool("run_command", {command: "echo no"}), "needs the user's permission"), "commands ask first")
+check(has(run_tool("write_file", {path: "x.txt", content: "x"}), "needs the user's permission") and not exists(base + "/x.txt"), "writes ask first")
+s.mode = "edits"
+SETTINGS = s
+run_tool("write_file", {path: "x.txt", content: "x"})
+check(exists(base + "/x.txt"), "edits mode writes without asking")
+check(has(run_tool("run_command", {command: "echo no"}), "needs the user's permission"), "edits mode still asks for commands")
+
+# several edits at once: all or nothing
+s = SETTINGS
+s.mode = "yolo"
+SETTINGS = s
+PRINT_MODE = no
+TURN = 1
+CHECKPOINTS = []
+write(base + "/multi.txt", "alpha\nbeta\ngamma\n")
+r = run_tool("multi_edit", {path: "multi.txt", edits: [{old_string: "alpha", new_string: "ALPHA"}, {old_string: "gamma", new_string: "GAMMA"}]})
+check(read(base + "/multi.txt") == "ALPHA\nbeta\nGAMMA\n", "multi_edit: {r}")
+r = run_tool("multi_edit", {path: "multi.txt", edits: [{old_string: "beta", new_string: "B"}, {old_string: "nope", new_string: "x"}]})
+check(has(r, "edit 2") and read(base + "/multi.txt") == "ALPHA\nbeta\nGAMMA\n", "multi_edit changes nothing when one fails: {r}")
+r = run_tool("multi_edit", {path: "multi.txt", edits: "[\{\"old_string\": \"beta\", \"new_string\": \"BETA\"}]"})
+check(read(base + "/multi.txt") == "ALPHA\nBETA\nGAMMA\n", "multi_edit takes edits sent as JSON text: {r}")
+run_tool("edit_file", {path: "multi.txt", old_string: "BETA", new_string: "beta"})
+
+# moving, deleting, and taking it all back
+TURN = 2
+run_tool("move_file", {from_path: "multi.txt", to_path: "moved/multi.txt"})
+check(not exists(base + "/multi.txt") and exists(base + "/moved/multi.txt"), "move_file")
+check(has(run_tool("move_file", {from_path: "README.md", to_path: "moved/multi.txt"}), "already exists"), "move_file won't overwrite")
+run_tool("delete_file", {path: "README.md"})
+check(not exists(base + "/README.md"), "delete_file")
+run_tool("write_file", {path: "brand_new.txt", content: "new\n"})
+d = changes()
+check(len(d) == 4, "changes: {map(d, c => rel(c.path))}")
+done = undo_last()
+check(exists(base + "/README.md") and exists(base + "/multi.txt") and not exists(base + "/moved/multi.txt") and not exists(base + "/brand_new.txt"), "undo puts back request 2: {done}")
+check(read(base + "/multi.txt") == "ALPHA\nbeta\nGAMMA\n", "undo keeps request 1's edits")
+undo_last()
+check(read(base + "/multi.txt") == "alpha\nbeta\ngamma\n", "undo again goes back to before request 1")
+check(len(undo_last()) == 0, "nothing more to undo")
+check(line_count_diff(["a", "b", "b"], ["b"]) == 2, "line_count_diff")
+
+# web search results, from a saved results page
+page = "<div class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.rs%2Fserde%2F&amp;rut=1\">Serde &amp; <b>JSON</b></a> x <a class=\"result__snippet\" href=\"y\">A <b>fast</b> library</a>"
+page += "<a class=\"result__a\" href=\"https://duckduckgo.com/y.js?ad=1\">An advert</a>"
+found = search_results(page)
+check(len(found) == 1 and found[0].url == "https://docs.rs/serde/" and found[0].title == "Serde & JSON" and found[0].snippet == "A fast library", "search_results: {found}")
+check(url_decode("a%20b%2Fc") == "a b/c", "url_decode")
+
+# programs in the background
+r = run_tool("start_process", {command: "echo started && ping -n 30 127.0.0.1 > nul"})
+when not WINDOWS { r = run_tool("start_process", {command: "echo started; sleep 30"}) }
+check(has(r, "Started process") and has(r, "is running"), "start_process: {r}")
+n = PROCESSES[len(PROCESSES) - 1].id
+check(has(run_tool("process_output", {id: n}), "started"), "process_output")
+run_tool("stop_process", {id: n})
+check(not process_running(process_by_id(n)), "stop_process")
+check(has(run_tool("process_output", {id: 99}), "no process 99"), "unknown processes")
+
+# notes and custom commands
+WORKDIR = base
+where = add_note("Run the tests with: antares tests/check.ant")
+check(where == "ANTARES.md" and has(read(base + "/ANTARES.md"), "- Run the tests with"), "add_note")
+check(project_memory().name == "ANTARES.md", "notes are read from ANTARES.md")
+make_folder(base + "/.antares-code/commands")
+write(base + "/.antares-code/commands/hello.md", "# Say hello\nSay hello to $ARGUMENTS.\n")
+c = custom_commands()
+check(len(filter(c, x => x.name == "hello" and x.about == "Say hello")) == 1, "custom commands: {c}")
+check(has(map(read_only_specs(), t => t.function.name), "web_search") and not has(map(read_only_specs(), t => t.function.name), "write_file"), "read-only tools")
+
+# memory about the user and projects (kept in tests/memory while testing)
+when exists(memory_folder()) {
+    when WINDOWS { shell("rmdir /s /q \"" + native(memory_folder()) + "\"") } else { shell("rm -rf \"" + memory_folder() + "\"") }
+}
+check(add_user_note("Prefers short answers"), "add_user_note")
+check(not add_user_note("prefers short answers"), "the same fact isn't added twice")
+add_user_note("Writes games in Antares")
+check(len(note_lines(you_file())) == 2 and has(user_memory(), "Writes games in Antares"), "user_memory: {user_memory()}")
+check(has(run_tool("remember", {note: "Likes dark themes", about: "you"}), "every project"), "remember about you")
+check(forget("dark themes") == 1 and len(note_lines(you_file())) == 2, "forget")
+note_project("Added a scoreboard")
+WORKDIR = base + "/src"
+note_project("Fixed the parser")
+check(has(other_projects(), "Added a scoreboard") and not has(other_projects(), "Fixed the parser"), "other_projects leaves out this one: {other_projects()}")
+WORKDIR = base
+check(begins(note_lines(projects_file())[0], "- " + base + "/src ·") and len(note_lines(projects_file())) == 2, "the latest project comes first")
+repeat 7 as i { note_recent_work("Step {i}") }
+recent = filter(lines(read(base + "/ANTARES.md")), l => has(l, ": Step"))
+check(len(recent) == 5 and has(recent[4], "Step 7") and has(read(base + "/ANTARES.md"), "- Run the tests with"), "recent work keeps the latest 5 and the notes: {recent}")
+MESSAGES = [{role: "user", content: "Make the snake faster"}, {role: "assistant", content: "Done: speed is now 12."}, {role: "user", content: "Plan mode: ..."}]
+d = session_digest()
+check(len(d.asked) == 1 and len(d.answers) == 1, "session_digest: {d}")
+check(has(system_prompt(), "Writes games in Antares"), "what is known about the user goes into the instructions")
+when WINDOWS { shell("rmdir /s /q \"" + native(memory_folder()) + "\"") } else { shell("rm -rf \"" + memory_folder() + "\"") }
+
+# starting again: keys and settings go; with all, memory and conversations too
+make_folder(DATA_DIR + "/sessions")
+write(DATA_DIR + "/sessions/x.json", "\{}")
+save_key("gemini", "AIza-reset-test-000000")
+s = SETTINGS
+s.mode = "ask"
+SETTINGS = s
+save_settings()
+add_user_note("Likes tea")
+gone = reset_data(no)
+check(not exists(keys_file()) and not exists(DATA_DIR + "/settings.json") and KEYS.gemini == nothing, "reset removes keys and settings: {gone}")
+check(SETTINGS.mode == DEFAULT_SETTINGS.mode and exists(DATA_DIR + "/sessions/x.json") and len(note_lines(you_file())) == 1, "reset keeps conversations and memory")
+reset_data(yes)
+check(not exists(DATA_DIR + "/sessions") and not exists(memory_folder()), "reset all removes conversations and memory")
+s = SETTINGS
+s.color = no
+SETTINGS = s
+
+# new versions
+check(is_newer("v2.1.0", "2.0.0") and is_newer("2.10.0", "2.9.9") and is_newer("v3", "2.9") and not is_newer("v2.1.0", "2.1.0") and not is_newer("2.0.9", "2.1"), "comparing versions")
+check(version_numbers("v2.10.1") == [2, 10, 1], "version_numbers")
+
+# the welcome box fits the terminal, shortening long parts in the middle
+row = [["folder  ", "dim"], ["C:/Users/someone/Documents/Projects/very/long/path/to/project", ""]]
+f = fit_row(row, 30)
+check(len(row_text(f)) == 30 and has(row_text(f), "…") and begins(row_text(f), "folder  C:/") and ends(row_text(f), "project"), "fit_row: {row_text(f)}")
+check(row_text(fit_row(row, 200)) == row_text(row), "short rows are left alone")
+
+# todos, unknown tools, and tool inputs
+check(has(run_tool("todo_write", {todos: [{content: "a", status: "completed"}, {content: "b", status: "in_progress"}]}), "updated"), "todo_write")
+check(len(TODOS) == 2, "todos kept")
+check(has(run_tool("dance", {}), "no tool called dance"), "unknown tools")
+check(inputs_of({function: {name: "x", arguments: "\{\"a\": 1}"}}).a == 1, "inputs from JSON text")
+check(inputs_of({function: {name: "x", arguments: ""}}) == {}, "empty inputs")
+check(inputs_of({function: {name: "x", arguments: "\{oops"}}) == nothing, "bad inputs")
+check(chat_model("nvidia/nemotron-3-ultra-550b-a55b") and not chat_model("nvidia/nv-embedqa-mistral-7b-v2"), "chat models")
+
+# two services: which one a model belongs to, keys, and the best models
+check(provider_of("nvidia/nemotron-3-ultra-550b-a55b") == "nvidia" and provider_of("mistralai/mistral-large-4-1t-a52b") == "nvidia", "NVIDIA models have a slash")
+check(provider_of("gemini-3.8-flash") == "gemini" and provider_of("gemma-3-27b-it") == "gemini", "Gemini models don't")
+check(chat_model("gemini-3.8-flash") and not chat_model("gemini-embedding-001") and not chat_model("imagen-4.0-generate") and not chat_model("gemini-2.5-flash-preview-tts"), "Gemini chat models")
+check(recommended("gemini-3.8-flash") and recommended("gemini-3.8-pro") and not recommended("gemini-3.8-flash-lite") and not recommended("gemini-3.9-pro-preview"), "recommended Gemini models")
+check(default_model("gemini", ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-pro", "gemini-3.8-flash-lite"]) == "gemini-3.8-flash", "the newest plain Flash first")
+check(default_model("nvidia", ["a/b", "nvidia/nemotron-3.5-super-vl-120b-a12b"]) == "nvidia/nemotron-3.5-super-vl-120b-a12b", "a recommended NVIDIA model")
+check(masked("nvapi-abcdefghijklmnop1234") == "nvapi-…1234" and masked(nothing) == "not set", "keys are shown masked")
+make_folder(DATA_DIR)
+save_key("gemini", "AIza-test-key-123456")
+check(KEYS.gemini == "AIza-test-key-123456" and load(keys_file()).gemini == "AIza-test-key-123456", "save_key")
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing}
+load_keys()
+check(KEYS.gemini == "AIza-test-key-123456", "load_keys reads the keys file")
+check(has(explain_problem("error 400 from Gemini: API key not valid. Please pass a valid API key."), "didn't accept the API key"), "a bad Gemini key is explained")
+check(provider_of("nvidia/nemotron-3-ultra-550b-a55b:free") == "openrouter" and provider_of("cohere/north-mini-code:free") == "openrouter", "OpenRouter's free models end in :free")
+or_ids = ["cohere/north-mini-code:free", "google/gemma-4-31b-it:free", "liquid/lfm-3-1.7b:free", "nvidia/nemotron-3-ultra-550b-a55b:free"]
+check(suggested_models("openrouter", or_ids) == ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"], "OpenRouter suggestions: {suggested_models("openrouter", or_ids)}")
+check(suggested_models("gemini", ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.8-pro", "gemini-3.8-flash-lite"]) == ["gemini-3.8-flash", "gemini-3.8-pro"], "Gemini suggestions")
+check(suggested_models("gemini", ["gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-omni-1.2-flash", "gemini-pro-latest"]) == ["gemini-3.8-flash", "gemini-pro-latest"], "Gemini suggestions skip previews and odd models")
+check(recommended("nvidia/nemotron-3-ultra-550b-a55b:free") and not recommended("liquid/lfm-3-1.7b:free"), "recommended OpenRouter models")
+check(squeeze("abcdefghij", 4) == "ab\n... [6 characters cut] ...\nij", "squeeze")
+
+when WINDOWS { shell("rmdir /s /q \"" + native(base) + "\"") } else { shell("rm -rf \"" + base + "\"") }
+when WINDOWS { shell("rmdir /s /q \"" + native(DATA_DIR) + "\"") } else { shell("rm -rf \"" + DATA_DIR + "\"") }
+show "Antares Code tools: all checks passed"

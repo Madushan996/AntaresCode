@@ -1,0 +1,181 @@
+# Antares Code: checking for new versions, and installing them.
+#
+# New versions are published as releases on GitHub, with acode.exe
+# attached. /update asks GitHub for the latest release, and if it is newer:
+#   - as acode.exe, it downloads the new one and swaps it in (Windows lets a
+#     running program be renamed, so the old one steps aside as
+#     acode.old.exe, deleted next time);
+#   - from the source, it updates with git pull if the folder came from git,
+#     or says where to download it.
+# Once a day, at the start, it also checks quietly and says if there is one.
+
+REPO = "Madushan996/AntaresCode"
+RELEASES_PAGE = "https://github.com/" + REPO + "/releases"
+
+to update_file() = DATA_DIR + "/update.json"
+
+# The latest release: {tag, notes, page, exe}.
+to latest_release(seconds) {
+    r = json(fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {headers: {Accept: "application/vnd.github+json", "User-Agent": "Antares-Code"}, timeout: seconds}))
+    exe = nothing
+    each a in arg(r, "assets", []) {
+        when lower(arg(a, "name", "")) == "acode.exe" { exe = a.browser_download_url }
+    }
+    give {tag: text(arg(r, "tag_name", "")), notes: text(arg(r, "body", "")), page: text(arg(r, "html_url", RELEASES_PAGE)), exe: exe}
+}
+
+# A version as numbers: "v2.10.1" gives [2, 10, 1].
+to version_numbers(v) {
+    out = []
+    each part in split(replace(lower(trim(v)), "v", ""), ".") {
+        n = number_or_nothing(part)
+        when n == nothing { n = 0 }
+        out = push(out, n)
+    }
+    give out
+}
+
+# Whether version a is newer than version b.
+to is_newer(a, b) {
+    x = version_numbers(a)
+    y = version_numbers(b)
+    each i in range(max(len(x), len(y))) {
+        p = 0
+        q = 0
+        when i < len(x) { p = x[i] }
+        when i < len(y) { q = y[i] }
+        when p > q { give yes }
+        when p < q { give no }
+    }
+    give no
+}
+
+# Running as acode.exe, rather than from antares_code.ant.
+to packed() = not exists(HOME + "/antares_code.ant")
+
+to remember_check(tag) {
+    try {
+        make_folder(DATA_DIR)
+        save({checked: today(), latest: tag}, update_file())
+    } else problem {
+        nothing
+    }
+}
+
+# Downloads the new acode.exe and puts it in place of this one.
+to install_exe(release) {
+    target = HOME + "/acode.exe"
+    fresh = HOME + "/acode.new.exe"
+    when exists(fresh) { delete(fresh) }
+    show dim("  Downloading {release.tag}…")
+    r = shell("curl -L -s -S --max-time 600 -o \"" + native(fresh) + "\" \"" + release.exe + "\"", {timeout: 660})
+    erase_line()
+    size = nothing
+    when exists(fresh) { size = number_or_nothing(trim(shell("for %I in (\"" + native(fresh) + "\") do @echo %~zI").output)) }
+    when size == nothing or size < 500000 {
+        show red("  The download didn't work: " + one_line(r.errors, 200))
+        show "  You can download it yourself from {release.page}"
+        when exists(fresh) { delete(fresh) }
+        give nothing
+    }
+    when not exists(target) {
+        show green("  ✓ Downloaded {release.tag} as {native(fresh)}.") + dim(" (This copy isn't called acode.exe, so it was left as it is.)")
+        give nothing
+    }
+    old = HOME + "/acode.old.exe"
+    when exists(old) {
+        try { delete(old) } else problem { nothing }
+    }
+    shell("move /y \"" + native(target) + "\" \"" + native(old) + "\"")
+    shell("move /y \"" + native(fresh) + "\" \"" + native(target) + "\"")
+    when exists(target) {
+        show green("  ✓ Updated to {release.tag}.") + " Start acode again to use the new version."
+    } else {
+        # put the old one back
+        shell("move /y \"" + native(old) + "\" \"" + native(target) + "\"")
+        show red("  Couldn't put the new version in place.") + " You can download it yourself from {release.page}"
+    }
+}
+
+to command_update() {
+    show dim("  Checking for a new version…")
+    release = nothing
+    try {
+        release = latest_release(20)
+    } else problem {
+        erase_line()
+        when has(problem, "error 404") {
+            show yellow("  No version has been published yet.") + dim(" ({RELEASES_PAGE})")
+        } else {
+            show red("  Couldn't check for a new version: " + one_line(problem, 160))
+        }
+        give nothing
+    }
+    erase_line()
+    remember_check(release.tag)
+    when not is_newer(release.tag, APP_VERSION) {
+        show green("  ✓ You have the latest version, {APP_VERSION}.")
+        give nothing
+    }
+    show ""
+    show "  " + brand("✻ ") + bold("A new version is out: {release.tag}") + dim("  (you have {APP_VERSION})")
+    notes = filter(lines(release.notes), l => trim(l) != "")
+    each l in slice(notes, 0, min(len(notes), 12)) { show "    " + dim(one_line(l, 110)) }
+    when len(notes) > 12 { show "    " + dim("… more at {release.page}") }
+    show ""
+    when packed() {
+        when release.exe == nothing {
+            show "  Download it from {release.page}"
+            give nothing
+        }
+        answer = input(brand("  Download and install it now? (Y/n) › "))
+        when answer == nothing or begins(lower(trim(answer)), "n") {
+            show dim("  Not now. /update when you're ready.")
+            give nothing
+        }
+        install_exe(release)
+        give nothing
+    }
+    when exists(HOME + "/.git") {
+        answer = input(brand("  Update it with git pull? (Y/n) › "))
+        when answer == nothing or begins(lower(trim(answer)), "n") {
+            show dim("  Not now. /update when you're ready.")
+            give nothing
+        }
+        r = shell("git pull --ff-only", {folder: HOME, timeout: 120})
+        out = trim(r.output + "\n" + r.errors)
+        when out != "" { preview(out, 8) }
+        when r.code == 0 { show green("  ✓ Updated.") + " Start Antares Code again to use the new version." } else { show red("  git pull didn't work;") + " you can download it from {release.page}" }
+        give nothing
+    }
+    show "  Download it from {release.page}"
+}
+
+# At the start: tidies up after an update, and once a day checks quietly
+# (a few seconds at most) whether there is a new version.
+to startup_update_check() {
+    old = HOME + "/acode.old.exe"
+    when exists(old) {
+        try { delete(old) } else problem { nothing }
+    }
+    when not SETTINGS.check_updates or PRINT_MODE { give nothing }
+    known = nothing
+    when exists(update_file()) {
+        try { known = load(update_file()) } else problem { known = nothing }
+    }
+    latest = nothing
+    when known != nothing and arg(known, "checked", "") == today() {
+        latest = arg(known, "latest", nothing)
+    } else {
+        try {
+            latest = latest_release(5).tag
+        } else problem {
+            latest = nothing
+        }
+        remember_check(latest)
+    }
+    when latest != nothing and latest != "" and is_newer(latest, APP_VERSION) {
+        show "  " + brand("✻ ") + "A new version of Antares Code is out ({latest}): " + bold("/update") + dim(" installs it.")
+        show ""
+    }
+}

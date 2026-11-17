@@ -1,0 +1,189 @@
+# Antares Code: a coding agent for the terminal, powered by NVIDIA's and
+# Google's Gemini models.
+# Written entirely in Antares.
+#
+#   antares antares_code.ant [folder] [-m model] [-p "prompt"] [--yolo] [--no-color]
+#
+# or, on Windows, acode.bat with the same options. Run it in (or point it
+# at) the project to work on; /help lists the commands.
+
+use "lib/state"
+use "lib/guide"
+use "lib/ui"
+use "lib/api"
+use "lib/tools"
+use "lib/web"
+use "lib/processes"
+use "lib/history"
+use "lib/memory"
+use "lib/setup"
+use "lib/update"
+use "lib/agent"
+use "lib/commands"
+
+to current_folder() {
+    where_cmd = "pwd"
+    when WINDOWS { where_cmd = "cd" }
+    give replace(shell(where_cmd).output, "\\", "/")
+}
+
+# Adds the contents of any @file mentioned in the message, or the list of
+# files in an @folder.
+to with_mentions(message) {
+    extra = ""
+    each w in split(message) {
+        when begins(w, "@") and len(w) > 1 {
+            name = trim(slice(w, 1))
+            each ch in [",", ".", ";", ":", ")", "?", "!"] {
+                when ends(name, ch) and not exists(full_path(name)) { name = slice(name, 0, len(name) - 1) }
+            }
+            p = full_path(name)
+            when exists(p) and is_folder(p) {
+                listing = all_files(p)
+                shown = slice(listing, 0, min(len(listing), 300))
+                extra += "\n\nThe files in the folder {name}:\n" + join(shown, "\n")
+                when len(listing) > 300 { extra += "\n[{len(listing) - 300} more]" }
+                show dim("  ⎿  included the list of {len(listing)} files in {name}")
+            } else when exists(p) {
+                body = squeeze(read(p), 40000)
+                extra += "\n\nThe file {name}:\n```\n{body}\n```"
+                show dim("  ⎿  included {name} ({len(lines(body))} lines)")
+            }
+        }
+    }
+    give message + extra
+}
+
+# !command: runs it in the working folder, and tells the model.
+to bang(command) {
+    r = shell(command, {folder: WORKDIR, timeout: 600})
+    out = r.output
+    when r.errors != "" {
+        when out != "" { out += "\n" }
+        out += r.errors
+    }
+    when out != "" { show out }
+    when r.code != 0 { show red("  exit code {r.code}") }
+    change MESSAGES = push(MESSAGES, {role: "user", content: "I ran this command myself, in the working folder:\n$ {command}\n{squeeze(out, 20000)}\n[exit code {r.code}]\n(No need to reply to this; it's for context.)"})
+    change MESSAGES = push(MESSAGES, {role: "assistant", content: "Noted."})
+}
+
+# Reads what the user types; a line ending in \ carries on.
+to read_message() {
+    first = input(brand("› "))
+    when first == nothing { give nothing }
+    # Windows PowerShell puts a byte-order mark before text piped in
+    message = replace(first, char(65279), "")
+    while ends(message, "\\") {
+        message = slice(message, 0, len(message) - 1) + "\n"
+        more = input(brand("  "))
+        when more == nothing { stop }
+        message += more
+    }
+    give message
+}
+
+to main() {
+    migrate_old_data()
+    load_settings()
+    # the command line
+    given = args()
+    folder = nothing
+    prompt = nothing
+    i = 0
+    while i < len(given) {
+        a = given[i]
+        when (a == "-m" or a == "--model") and i + 1 < len(given) {
+            i += 1
+            set_setting("model_id", given[i])
+        } else when (a == "-p" or a == "--print") and i + 1 < len(given) {
+            i += 1
+            prompt = given[i]
+        } else when a == "--yolo" {
+            set_for_this_run("mode", "yolo")
+        } else when a == "--no-color" {
+            set_for_this_run("color", no)
+        } else when a == "-h" or a == "--help" {
+            show "{APP_NAME}: antares antares_code.ant [folder] [-m model] [-p \"prompt\"] [--yolo] [--no-color]"
+            give nothing
+        } else {
+            folder = a
+        }
+        i += 1
+    }
+
+    load_keys()
+    when len(filter(PROVIDER_ORDER, p => has_key(p))) == 0 {
+        when prompt != nothing {
+            show red("No API key is set up. Start Antares Code once without -p to set one up,")
+            show "or set NVIDIA_API_KEY, GEMINI_API_KEY or OPENROUTER_API_KEY."
+            give nothing
+        }
+        when SETTINGS.color { clear() }
+        when not run_setup(yes) { give nothing }
+    }
+    # a model whose service has no key: one from a service that does
+    when not has_key(provider()) {
+        other = filter(PROVIDER_ORDER, p => has_key(p))[0]
+        ids = []
+        try { ids = provider_models(other, KEYS[other]) } else problem { ids = [] }
+        chosen = default_model(other, ids)
+        when chosen != nothing {
+            show dim("  (There is no {provider_name(provider())} key, so using {chosen} from {provider_name(other)}.)")
+            set_for_this_run("model_id", chosen)
+        }
+    }
+    change WORKDIR = current_folder()
+    # started by double-clicking acode.exe: it is in its own folder, which
+    # isn't a project, so ask which one to work in
+    when folder == nothing and prompt == nothing and lower(WORKDIR) == lower(replace(HOME, "\\", "/")) and not exists(WORKDIR + "/antares_code.ant") {
+        answer = input(brand("  Which project folder should I work in? ") + dim("(paste its path, or Enter for this folder) ") + brand("› "))
+        when answer != nothing and trim(answer) != "" { folder = trim(replace(answer, "\"", "")) }
+    }
+    when folder != nothing {
+        target = full_path(folder)
+        when not is_folder(target) {
+            show red("There is no folder " + target)
+            give nothing
+        }
+        change WORKDIR = replace(target, "\\", "/")
+    }
+    detect_tools()
+    start_conversation()
+
+    # -p: answer one prompt, print what happened, and leave
+    when prompt != nothing {
+        change PRINT_MODE = yes
+        # plain text: what -p prints usually goes to a file or another program
+        set_for_this_run("color", no)
+        agent_turn(with_mentions(prompt))
+        stop_all_processes()
+        give nothing
+    }
+
+    when SETTINGS.color { clear() }          # also lets Windows show colours
+    banner()
+    startup_update_check()
+    while yes {
+        message = read_message()
+        when message == nothing { stop }
+        l = trim(message)
+        when l == "" { skip }
+        when l == "exit" or l == "quit" { stop }
+        when begins(l, "/") {
+            when run_command_line(l) == "exit" { stop }
+            skip
+        }
+        when begins(l, "!") {
+            bang(trim(slice(l, 1)))
+            skip
+        }
+        timed_turn(with_mentions(message))
+        show ""
+    }
+    remember_session()
+    stop_all_processes()
+    show dim("  Bye.")
+}
+
+main()

@@ -1,0 +1,143 @@
+# Builds acode.exe: Antares Code as one program, with Antares inside it, so
+# it runs on a Windows PC that doesn't have Antares installed.
+#
+#   antares build.ant
+#
+# It makes lib/guide.ant from lib/antares_guide.md (so the guide is part of
+# the program), draws the icon (a glowing star, like Antares), makes it into
+# an .ico file, and packs everything into dist/acode.exe.
+
+HERE = replace(program_folder(), "\\", "/")
+WORK = HERE + "/build"
+DIST = HERE + "/dist"
+
+to native(p) = replace(p, "/", "\\")
+
+to make_folder(p) {
+    when not exists(p) { shell("mkdir \"" + native(p) + "\"") }
+}
+
+# ---------- the guide, as Antares text ----------
+
+to make_guide() {
+    md = replace(read(HERE + "/lib/antares_guide.md"), char(13), "")
+    quoted = replace(replace(replace(replace(md, "\\", "\\\\"), "\"", "\\\""), "\{", "\\\{"), "\n", "\\n")
+    write(HERE + "/lib/guide.ant", "# Made by build.ant from antares_guide.md: edit that, then build again.\n\nGUIDE = \"" + quoted + "\"\n")
+    show "  guide: lib/guide.ant ({len(md)} characters)"
+}
+
+# ---------- the icon ----------
+
+# The outline of a star with four long points and four short ones.
+to star_points(c, long, short, inner) {
+    pts = []
+    each k in range(16) {
+        a = k * 22.5 - 90
+        r = inner
+        when k % 4 == 0 { r = long }
+        when k % 4 == 2 { r = short }
+        pts = push(pts, [c + r * cos(a * 3.14159265 / 180), c + r * sin(a * 3.14159265 / 180)])
+    }
+    give pts
+}
+
+# The icon at one size, saved as a PNG file: the star glowing on a dark,
+# rounded square, drawn afresh for each size so small ones stay crisp.
+to draw_icon(size, file) {
+    s = size / 256
+    c = size / 2
+    p = picture(size, size)
+    canvas(p)
+    rect(0, 0, size, size, radial(c, c * 0.92, size * 0.78, ["#3b1745", "#170b2b", "#07050f"]), size * 0.22)
+    # the glow round the star
+    blend("add")
+    circle(c, c, size * 0.46, radial(c, c, size * 0.46, [[255, 110, 60, 0.75], [255, 70, 40, 0.25], [255, 40, 30, 0]]))
+    blend()
+    # a few far stars, where there is room for them
+    when size >= 48 {
+        each st in [[0.2, 0.22, 2.2], [0.8, 0.18, 1.6], [0.83, 0.76, 2.0], [0.17, 0.8, 1.4]] {
+            circle(size * st[0], size * st[1], st[2] * s * 1.6, [255, 230, 210, 0.85])
+        }
+    }
+    # the star: bolder at small sizes, so it still reads at 16 pixels
+    long = size * 0.43
+    short = size * 0.2
+    inner = size * 0.075
+    when size <= 32 {
+        long = size * 0.46
+        short = size * 0.3
+        inner = size * 0.16
+    }
+    polygon(star_points(c, long, short, inner), radial(c, c, long, ["#fffbe8", "#ffd666", "#ff8a3d", "#e0312a"]))
+    circle(c, c, size * 0.07, radial(c, c, size * 0.07, ["white", [255, 245, 220, 0]]))
+    when size >= 64 { glow(0.5, size * 0.05, 0.75) }
+    screenshot(file)
+    canvas()
+}
+
+# The size of a file in bytes.
+to file_size(f) = number(trim(shell("for %I in (\"" + native(f) + "\") do @echo %~zI").output))
+
+B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# Bytes as base64 text, 76 characters a line.
+to base64(bytes) {
+    n = len(bytes)
+    groups = floor((n + 2) / 3)
+    to group(g) {
+        i = g * 3
+        b0 = bytes[i]
+        b1 = 0
+        b2 = 0
+        when i + 1 < n { b1 = bytes[i + 1] }
+        when i + 2 < n { b2 = bytes[i + 2] }
+        v = b0 * 65536 + b1 * 256 + b2
+        out = B64[floor(v / 262144) % 64] + B64[floor(v / 4096) % 64]
+        when i + 1 < n { out += B64[floor(v / 64) % 64] } else { out += "=" }
+        when i + 2 < n { out += B64[v % 64] } else { out += "=" }
+        give out
+    }
+    codes = map(range(groups), group)
+    lines_of = map(range(floor((groups + 18) / 19)), k => join(slice(codes, k * 19, min(groups, k * 19 + 19)), ""))
+    give join(lines_of, "\n") + "\n"
+}
+
+# Little-endian bytes of a whole number.
+to le(v, count) = map(range(count), k => floor(v / 256 ^ k) % 256)
+
+# An .ico file holding PNG pictures (as Windows has allowed since Vista).
+# Antares writes text, not raw bytes, so the bytes go out as base64 and
+# Windows' certutil turns them back into a binary file.
+to make_ico(sizes, ico) {
+    pngs = map(sizes, sz => WORK + "/icon-{sz}.png")
+    each i in range(len(sizes)) { draw_icon(sizes[i], pngs[i]) }
+    lengths = map(pngs, f => file_size(f))
+    # (lists of numbers are tensors in Antares, so pieces are joined with concat)
+    parts = [[0, 0, 1, 0], le(len(sizes), 2)]
+    offset = 6 + 16 * len(sizes)
+    each i in range(len(sizes)) {
+        side = sizes[i] % 256          # 0 means 256
+        each piece in [[side, side, 0, 0], le(1, 2), le(32, 2), le(lengths[i], 4), le(offset, 4)] { parts = push(parts, piece) }
+        offset += lengths[i]
+    }
+    each i in range(len(pngs)) { parts = push(parts, read_binary(pngs[i], "u8", 0, lengths[i])) }
+    bytes = concat(parts)
+    write(WORK + "/icon.b64", base64(bytes))
+    when exists(ico) { delete(ico) }
+    r = shell("certutil -f -decode \"" + native(WORK + "/icon.b64") + "\" \"" + native(ico) + "\"")
+    when not exists(ico) { fail("certutil couldn't make the icon: " + r.output) }
+    show "  icon: {native(ico)} ({file_size(ico)} bytes, sizes {join(map(sizes, x => text(x)), ", ")})"
+}
+
+# ---------- building ----------
+
+show "Building Antares Code…"
+make_folder(WORK)
+make_folder(DIST)
+make_guide()
+make_ico([256, 64, 48, 32, 16], HERE + "/acode.ico")
+exe = DIST + "/acode.exe"
+r = shell("antares build \"" + native(HERE + "/antares_code.ant") + "\" \"" + native(exe) + "\" --pack --icon \"" + native(HERE + "/acode.ico") + "\"", {timeout: 300})
+show trim(r.output + "\n" + r.errors)
+when not exists(exe) { fail("the build didn't make " + exe) }
+show "Done: {native(exe)} ({floor(file_size(exe) / 1024)} KB)"

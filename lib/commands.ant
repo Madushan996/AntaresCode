@@ -1,0 +1,604 @@
+# Antares Code: slash commands, and the settings file.
+
+to settings_path() = DATA_DIR + "/settings.json"
+
+# Settings changed for this run only (--yolo, --no-color, -p) are saved as
+# they were before.
+to save_settings() {
+    s = SETTINGS
+    each k in keys(RUN_ONLY) { s[k] = RUN_ONLY[k] }
+    try { save(s, settings_path()) } else problem { show red("  Couldn't save the settings: " + problem) }
+}
+
+# Changes a setting for this run only.
+to set_for_this_run(name, value) {
+    when not has(RUN_ONLY, name) {
+        r = RUN_ONLY
+        r[name] = SETTINGS[name]
+        change RUN_ONLY = r
+    }
+    s = SETTINGS
+    s[name] = value
+    change SETTINGS = s
+}
+
+to load_settings() {
+    when not exists(settings_path()) { give nothing }
+    try {
+        saved = load(settings_path())
+        s = SETTINGS
+        each k in keys(saved) {
+            when has(s, k) { s[k] = saved[k] }
+        }
+        # 8192 was the first version's default, too short for writing programs
+        when s.max_tokens == 8192 { s.max_tokens = 32768 }
+        change SETTINGS = s
+    } else problem {
+        show yellow("  settings.json couldn't be read, so the defaults are used: " + problem)
+    }
+}
+
+to set_setting(name, value) {
+    s = SETTINGS
+    s[name] = value
+    change SETTINGS = s
+    # chosen on purpose now, so it is kept from here on
+    when has(RUN_ONLY, name) {
+        r = {}
+        each k in keys(RUN_ONLY) {
+            when k != name { r[k] = RUN_ONLY[k] }
+        }
+        change RUN_ONLY = r
+    }
+    save_settings()
+}
+
+to show_help() {
+    show ""
+    show bold("Commands")
+    rows = [
+        ["/plan <task>", "look around and plan first; you approve the plan before anything changes"],
+        ["/undo", "take back the file changes of the last request"],
+        ["/diff [file]", "the files changed in this conversation, or one file's changes"],
+        ["/review", "review the changes not yet committed, for bugs"],
+        ["/commit", "commit the changes with a message written for them"],
+        ["/setup", "the welcome screen again: services and keys, model, how it works, memory"],
+        ["/keys", "which API keys are set"],
+        ["/update", "check for a new version, and install it"],
+        ["/reset [all]", "remove your keys and settings and start again from the welcome screen (all: memory and conversations too)"],
+        ["/model", "pick a model from a numbered list (NVIDIA, Gemini and OpenRouter's free ones)"],
+        ["/model <number or name>", "switch model (part of a name, words in any order)"],
+        ["/models [word]", "list the chat models (refreshed), optionally only those containing a word"],
+        ["/test [number or name]", "check that a model answers and can use tools"],
+        ["/mode yolo|edits|ask", "never ask, work on its own (default) / edit freely, ask for commands / ask before edits and commands"],
+        ["/clear", "start a new conversation"],
+        ["/compact [note]", "summarise the conversation to make room"],
+        ["/resume", "carry on the last conversation in this folder"],
+        ["/init", "study the project and write ANTARES.md, notes read at every start"],
+        ["/memory [on|off]", "what it remembers about you and your projects; turn remembering on or off"],
+        ["/remember <note>", "add a note to this project's notes"],
+        ["/me [fact]", "what it knows about you, or add a fact (used in every project)"],
+        ["/forget <words>", "take out notes containing those words"],
+        ["/tools", "the tools the model can use"],
+        ["/processes", "programs running in the background; /stop <number> stops one"],
+        ["/export [file]", "save the conversation as a Markdown file"],
+        ["/todos", "show the task list"],
+        ["/status", "model, folder, mode and tokens used"],
+        ["/thinking", "show or hide the model's reasoning"],
+        ["/max <tokens>", "the longest reply allowed"],
+        ["/cd <folder>", "work in another folder"],
+        ["/color", "colours on or off"],
+        ["/exit", "leave (also: exit, quit)"],
+    ]
+    each r in rows { show "  " + brand(pad(r[0], 26)) + r[1] }
+    show ""
+    show bold("Also")
+    show "  " + brand(pad("!command", 26)) + "run a command yourself; the model sees what it printed"
+    show "  " + brand(pad("@path/to/file", 26)) + "include a file in your message (@folder: its list of files)"
+    show "  " + brand(pad("line ending in \\", 26)) + "carry on typing on the next line"
+    custom = custom_commands()
+    when len(custom) > 0 {
+        show ""
+        show bold("Your own commands")
+        each c in custom { show "  " + brand(pad("/" + c.name, 26)) + c.about }
+    }
+    show dim("  Add your own: a Markdown file in .antares-code/commands (in the project) or in commands")
+    show dim("  next to Antares Code; /name runs it, with $ARGUMENTS replaced by what follows.")
+    show ""
+}
+
+to model_line(i, id) {
+    mark = "  "
+    when id == SETTINGS.model_id { mark = brand("● ") }
+    star = ""
+    when recommended(id) { star = brand("  ★ recommended") }
+    give "  " + mark + dim(pad(i, 3) + ".") + " " + id + star
+}
+
+# A model name as plain words: "mistralai/mistral-large-4-1t-a52b" gives
+# "mistralai mistral large 4 1t a52b".
+to name_words(s) {
+    t = lower(trim(s))
+    each ch in ["-", "_", "/", ":", ","] { t = replace(t, ch, " ") }
+    give join(filter(split(t), w => w != ""), " ")
+}
+
+# Whether a model's name has every word typed, in any order, so that
+# "mistral 4 large" finds mistral-large-4-1t-a52b and "kimi k3.1" finds a
+# kimi-k3.1 model.
+to name_matches(id, typed) {
+    name = name_words(id)
+    each w in split(name_words(typed)) {
+        when not has(name, w) { give no }
+    }
+    give yes
+}
+
+# Said when nothing matches: build.nvidia.com shows some models (often the
+# newest) that can only be tried in its playground, and those aren't in the
+# list NVIDIA gives to API keys.
+to not_listed_note() {
+    show dim("  NVIDIA's API only offers models that are open to API keys. Some models on")
+    show dim("  build.nvidia.com (often the newest) are marked \"API access not available yet\"")
+    show dim("  and work only in its playground; they appear here once NVIDIA opens them.")
+}
+
+to list_models(word, refresh) {
+    try {
+        ids = nv_models(refresh)
+    } else problem {
+        show red("  Couldn't get the list of models: " + explain_problem(problem))
+        give []
+    }
+    show ""
+    show bold("Chat models") + dim("  (★ = tested: fast, and good with tools)")
+    shown = 0
+    last = ""
+    each i in range(len(ids)) {
+        when word == "" or name_matches(ids[i], word) {
+            p = provider_of(ids[i])
+            when p != last {
+                show ""
+                show "  " + bold(provider_name(p))
+                last = p
+            }
+            show model_line(i + 1, ids[i])
+            shown += 1
+        }
+    }
+    missing = filter(PROVIDER_ORDER, p => not has_key(p))
+    when len(missing) > 0 { show dim("\n  No key for " + join(map(missing, p => provider_name(p)), ", ") + ": /setup adds one.") }
+    when shown == 0 {
+        show dim("  No model names contain \"{word}\".")
+        when has_key("nvidia") and not has(lower(word), "gemini") { not_listed_note() }
+    }
+    show ""
+    give ids
+}
+
+# A model chosen by its number in the list, its full name, or part of it.
+to pick_model(choice) {
+    ids = nv_models(no)
+    c = trim(choice)
+    # "/model 3" typed again at the picker, or "/model3"
+    when begins(lower(c), "/models") { c = trim(slice(c, 7)) } else when begins(lower(c), "/model") { c = trim(slice(c, 6)) }
+    when c == "" or begins(c, "/") {
+        show red("  Type a model's number or part of its name, like 10 or laguna.")
+        give nothing
+    }
+    n = number_or_nothing(c)
+    when n != nothing and n == floor(n) and n >= 1 and n <= len(ids) { give ids[n - 1] }
+    when has(ids, c) { give c }
+    matches = filter(ids, id => name_matches(id, c))
+    when len(matches) == 1 { give matches[0] }
+    when len(matches) > 1 {
+        show yellow("  \"{c}\" matches {len(matches)} models:")
+        each m in matches { show "    " + m }
+        give nothing
+    }
+    parts = split(c, "/")
+    when len(parts) == 2 and parts[0] != "" and parts[1] != "" and not has(c, " ") {
+        show yellow("  {c} isn't in NVIDIA's list for this key, but it will be tried.")
+        give c
+    }
+    when ends(lower(c), ":free") and has(c, "/") and not has(c, " ") {
+        show yellow("  {c} isn't in OpenRouter's list of free models with tools, but it will be tried.")
+        give c
+    }
+    when begins(lower(c), "gemini-") and not has(c, " ") {
+        show yellow("  {c} isn't in Gemini's list for this key, but it will be tried.")
+        give c
+    }
+    show red("  No model matches \"{c}\". /models lists them.")
+    not_listed_note()
+    give nothing
+}
+
+# Switches model after checking that it answers: NVIDIA's free models are
+# sometimes busy or switched off, and finding out mid-task wastes minutes.
+to switch_model(id) {
+    show dim("  Checking that {id} answers…")
+    t = test_model(id)
+    erase_line()
+    when not t.ok {
+        show red("  ✗ {id} isn't answering: " + t.problem)
+        answer = input(brand("  Switch to it anyway? (y/n) "))
+        when answer == nothing or not has(["y", "yes"], lower(trim(answer))) {
+            show dim("  Still using {SETTINGS.model_id}.")
+            give nothing
+        }
+    } else when not t.tools {
+        show yellow("  ~ {id} answered in {fixed(t.seconds, 1)} s but didn't use a tool when asked, so it may not work well as a coding agent.")
+    } else {
+        show dim("  ✓ answered in {fixed(t.seconds, 1)} s and used a tool correctly")
+    }
+    set_setting("model_id", id)
+    show green("  Now using {id}") + dim(" from {provider_name(provider_of(id))} (saved for next time)")
+}
+
+to command_model(rest) {
+    try {
+        when rest == "" {
+            ids = list_models("", no)
+            when len(ids) == 0 { give nothing }
+            answer = input(brand("  Model number or name (Enter keeps {SETTINGS.model_id}): "))
+            when answer == nothing or trim(answer) == "" { give nothing }
+            id = pick_model(answer)
+        } else {
+            id = pick_model(rest)
+        }
+        when id != nothing { switch_model(id) }
+    } else problem {
+        show red("  " + explain_problem(problem))
+    }
+}
+
+to command_test(rest) {
+    id = SETTINGS.model_id
+    when rest != "" {
+        try { id = pick_model(rest) } else problem {
+            show red("  " + explain_problem(problem))
+            give nothing
+        }
+        when id == nothing { give nothing }
+    }
+    show dim("  Testing {id}…")
+    t = test_model(id)
+    erase_line()
+    when not t.ok {
+        show red("  ✗ {id}: " + t.problem)
+    } else when t.tools {
+        show green("  ✓ {id} answered in {fixed(t.seconds, 1)} s and used a tool correctly.")
+    } else {
+        show yellow("  ~ {id} answered in {fixed(t.seconds, 1)} s, but didn't use the tool: it may not work well as a coding agent.")
+    }
+}
+
+to command_status() {
+    show ""
+    show "  " + dim(pad("Model", 12)) + SETTINGS.model_id + dim("  " + provider_name(provider()))
+    show "  " + dim(pad("Keys", 12)) + join(map(PROVIDER_ORDER, p => provider_name(p) + " " + masked(KEYS[p])), dim(" · "))
+    show "  " + dim(pad("Folder", 12)) + WORKDIR
+    show "  " + dim(pad("Mode", 12)) + SETTINGS.mode
+    show "  " + dim(pad("Context", 12)) + "about {conversation_tokens()} tokens ({len(MESSAGES)} messages; summarised at {SETTINGS.compact_at})"
+    show "  " + dim(pad("Used", 12)) + "{USAGE.input} tokens in, {USAGE.output} out, {USAGE.calls} requests"
+    finder = "built-in tools (install ripgrep for faster search)"
+    when HAS_RG { finder = "ripgrep" }
+    show "  " + dim(pad("Search", 12)) + finder
+    show ""
+}
+
+to command_mode(rest) {
+    when not has(["ask", "edits", "yolo"], rest) {
+        show "  Mode is " + bold(SETTINGS.mode) + dim(". Choose: /mode yolo (never ask, work on its own), /mode edits (edit freely, ask for commands), /mode ask (ask before edits and commands)")
+        give nothing
+    }
+    set_setting("mode", rest)
+    refresh_system_prompt()
+    when rest == "yolo" {
+        show yellow("  Mode: yolo. The model works on its own: it edits files and runs commands without asking.")
+    } else {
+        show green("  Mode: " + rest)
+    }
+}
+
+to command_resume() {
+    p = session_path()
+    when not exists(p) {
+        show yellow("  There is no saved conversation for this folder.")
+        give nothing
+    }
+    try {
+        s = load(p)
+        msgs = s.messages
+        when len(msgs) > 0 and msgs[0].role == "system" { msgs[0] = {role: "system", content: system_prompt()} }
+        change MESSAGES = msgs
+        change TODOS = arg(s, "todos", [])
+        show green("  Carrying on the last conversation ({len(msgs)} messages).")
+        each m in msgs {
+            when m.role == "user" and kind(m.content) == "text" and not begins(m.content, "This is a summary") {
+                show dim("  › " + one_line(m.content, 100))
+            }
+        }
+    } else problem {
+        show red("  Couldn't read the saved conversation: " + problem)
+    }
+}
+
+to command_cd(rest) {
+    target = full_path(rest)
+    when not is_folder(target) {
+        show red("  There is no folder " + target)
+        give nothing
+    }
+    remember_session()
+    change WORKDIR = replace(target, "\\", "/")
+    detect_tools()
+    start_conversation()
+    show green("  Working in " + WORKDIR) + dim(" (new conversation)")
+}
+
+INIT_PROMPT = "Study this project and write a file called ANTARES.md in the working folder, notes for yourself in future sessions. Keep it short (under 60 lines) and include: what the project is; how to build, run and test it (the exact commands); how the code is organised (the main folders and files); and the coding conventions to follow. Look at the README, the build and package files, and a few source files first. If ANTARES.md (or NVCODE.md) already exists, improve it."
+
+REVIEW_PROMPT = "Review the changes in this project that aren't committed yet (git status and git diff; if this isn't a git repository, the files changed in this conversation). Look for bugs, missed edge cases, security problems and anything that doesn't fit the code around it. Don't change anything. Report what you find, most important first, each with path:line, and say briefly why it matters. If it all looks right, say so."
+
+COMMIT_PROMPT = "Commit the work: look at git status and git diff, stage the files that belong to this change (not secrets, build output or unrelated files), and commit with a clear message: a short first line saying what changed, then a few lines on why if it helps. Don't push. Then show the commit (git log -1 --stat)."
+
+# ---------- your own commands ----------
+
+# Markdown files in .antares-code/commands (in the project) and in commands
+# (next to the program): {name, about, path}. The project's win.
+to custom_commands() {
+    out = []
+    names = []
+    each dir in [WORKDIR + "/.antares-code/commands", HOME + "/commands"] {
+        when is_folder(dir) {
+            each f in files(dir) {
+                when ends(lower(f), ".md") {
+                    name = lower(slice(f, 0, len(f) - 3))
+                    when not has(names, name) {
+                        names = push(names, name)
+                        first = ""
+                        try {
+                            each l in lines(read(dir + "/" + f)) {
+                                when trim(l) != "" and first == "" { first = one_line(replace(l, "#", ""), 60) }
+                            }
+                        } else problem {
+                            first = "(couldn't be read)"
+                        }
+                        out = push(out, {name: name, about: first, path: dir + "/" + f})
+                    }
+                }
+            }
+        }
+    }
+    give out
+}
+
+# Runs /name args from a custom command, if there is one; gives yes if so.
+to run_custom(cmd, rest) {
+    each c in custom_commands() {
+        when "/" + c.name == cmd {
+            body = read(c.path)
+            when has(body, "$ARGUMENTS") {
+                body = replace(body, "$ARGUMENTS", rest)
+            } else when rest != "" {
+                body += "\n\n" + rest
+            }
+            timed_turn(body)
+            give yes
+        }
+    }
+    give no
+}
+
+to show_tools() {
+    show ""
+    each t in TOOL_SPECS {
+        about = t.function.description
+        dot = find(about, ". ")
+        when dot > 0 { about = slice(about, 0, dot + 1) }
+        show "  " + brand(pad(t.function.name, 16)) + one_line(about, 100)
+    }
+    show ""
+}
+
+to show_memory() {
+    m = project_memory()
+    when m == nothing {
+        show dim("  This project has no notes yet. /init writes them, and /remember <note> adds one.")
+        give nothing
+    }
+    show ""
+    show bold(m.name) + dim("  (read at the start of every session)")
+    each l in lines(m.body) { show "  " + l }
+    show ""
+}
+
+# The conversation as Markdown.
+to export_conversation(file) {
+    out = "# {APP_NAME} conversation\n\nModel: {SETTINGS.model_id}  \nFolder: {WORKDIR}\n"
+    each m in MESSAGES {
+        when m.role == "user" and kind(m.content) == "text" {
+            out += "\n## You\n\n" + m.content + "\n"
+        } else when m.role == "assistant" {
+            when kind(m.content) == "text" and trim(m.content) != "" { out += "\n## {APP_NAME}\n\n" + m.content + "\n" }
+            each call in calls_of(m) {
+                inputs = inputs_of(call)
+                when inputs == nothing { inputs = {} }
+                out += "\n> " + arg(call.function, "name", "?") + " " + one_line(to_json(inputs), 300) + "\n"
+            }
+        }
+    }
+    write(file, out)
+}
+
+# Gives "exit" to leave, or nothing.
+to run_command_line(l) {
+    words = split(trim(l))
+    cmd = lower(words[0])
+    rest = trim(slice(trim(l), len(words[0])))
+    when cmd == "/help" or cmd == "/?" {
+        show_help()
+    } else when cmd == "/exit" or cmd == "/quit" {
+        give "exit"
+    } else when cmd == "/model" {
+        command_model(rest)
+    } else when cmd == "/models" {
+        list_models(rest, yes)
+    } else when cmd == "/test" {
+        command_test(rest)
+    } else when cmd == "/mode" {
+        command_mode(lower(rest))
+    } else when cmd == "/yolo" {
+        command_mode("yolo")
+    } else when cmd == "/clear" {
+        remember_session()
+        start_conversation()
+        show green("  New conversation.")
+    } else when cmd == "/compact" {
+        compact(rest)
+    } else when cmd == "/resume" {
+        command_resume()
+    } else when cmd == "/init" {
+        agent_turn(INIT_PROMPT)
+        start_conversation()
+    } else when cmd == "/todos" {
+        when len(TODOS) == 0 { show dim("  No tasks yet.") } else { tool_todos({todos: TODOS}) }
+    } else when cmd == "/status" {
+        command_status()
+    } else when cmd == "/thinking" {
+        set_setting("thinking", not SETTINGS.thinking)
+        state_word = "hidden"
+        when SETTINGS.thinking { state_word = "shown" }
+        show "  The model's reasoning is now " + state_word + "."
+    } else when cmd == "/max" {
+        n = number_or_nothing(rest)
+        when n == nothing or n < 256 {
+            show "  The longest reply is {SETTINGS.max_tokens} tokens. /max 16000 changes it."
+        } else {
+            set_setting("max_tokens", floor(n))
+            show green("  Replies may now be up to {floor(n)} tokens.")
+        }
+    } else when cmd == "/cd" {
+        command_cd(rest)
+    } else when cmd == "/plan" {
+        when rest == "" {
+            show yellow("  Say what to plan: /plan add a dark mode to the settings page")
+        } else {
+            plan_turn(rest)
+        }
+    } else when cmd == "/setup" {
+        run_setup(no)
+        refresh_system_prompt()
+    } else when cmd == "/update" {
+        when lower(rest) == "off" or lower(rest) == "on" {
+            set_setting("check_updates", lower(rest) == "on")
+            show green("  The daily check for new versions is now {lower(rest)}.")
+        } else {
+            command_update()
+        }
+    } else when cmd == "/reset" {
+        when command_reset(rest) == "exit" { give "exit" }
+    } else when cmd == "/keys" {
+        show_keys()
+    } else when cmd == "/undo" {
+        command_undo()
+    } else when cmd == "/diff" {
+        command_diff(rest)
+    } else when cmd == "/review" {
+        timed_turn(REVIEW_PROMPT + " " + rest)
+    } else when cmd == "/commit" {
+        when not IN_GIT {
+            show yellow("  This folder isn't a git repository.")
+        } else {
+            timed_turn(COMMIT_PROMPT + " " + rest)
+        }
+    } else when cmd == "/tools" {
+        show_tools()
+    } else when cmd == "/memory" {
+        when lower(rest) == "on" or lower(rest) == "off" {
+            set_setting("memory", lower(rest) == "on")
+            show green("  Remembering between sessions is now {lower(rest)}.")
+        } else {
+            show_all_memory()
+        }
+    } else when cmd == "/me" {
+        when rest == "" {
+            you = note_lines(you_file())
+            when len(you) == 0 { show dim("  Nothing yet. /me <fact> adds one, such as: /me I prefer TypeScript and short answers") }
+            each l in you { show "  " + l }
+        } else when add_user_note(rest) {
+            show green("  Noted, for every project.")
+        } else {
+            show dim("  Already known.")
+        }
+    } else when cmd == "/forget" {
+        when rest == "" {
+            show yellow("  Say what to forget: /forget typescript")
+        } else {
+            gone = forget(rest)
+            show green("  Took out {gone} note(s).")
+        }
+    } else when cmd == "/remember" {
+        when rest == "" {
+            show yellow("  Say what to remember: /remember run the tests with npm test")
+        } else {
+            show green("  Saved in " + add_note(rest))
+        }
+    } else when cmd == "/processes" or cmd == "/ps" {
+        show_processes()
+    } else when cmd == "/stop" {
+        p = process_by_id(number_or_nothing(rest))
+        when p == nothing {
+            show yellow("  No process {rest}. /processes lists them.")
+        } else {
+            stop_process(p)
+            show green("  Stopped process {p.id}.")
+        }
+    } else when cmd == "/export" {
+        file = rest
+        when file == "" {
+            d = now()
+            file = "antares-code-{d.year}-{pad(d.month, 2, "right", "0")}-{pad(d.day, 2, "right", "0")}.md"
+        }
+        export_conversation(full_path(file))
+        show green("  Saved the conversation to " + rel(full_path(file)))
+    } else when cmd == "/color" or cmd == "/colour" {
+        set_setting("color", not SETTINGS.color)
+        state_word = "off"
+        when SETTINGS.color { state_word = "on" }
+        show "  Colours are now " + state_word + "."
+    } else when not run_custom(cmd, rest) {
+        show yellow("  I don't know {cmd}. /help lists the commands.")
+    }
+    give nothing
+}
+
+# ---------- the welcome box at the start ----------
+
+to banner() {
+    rows = [
+        [["✻", "brand"], [" ", ""], [APP_NAME, "bold"], ["  {APP_VERSION} · a coding agent on NVIDIA, Gemini and OpenRouter models, written in Antares", "dim"]],
+        [],
+        [[pad("model", 8), "dim"], [SETTINGS.model_id, ""], ["  " + provider_name(provider()), "dim"]],
+        [[pad("folder", 8), "dim"], [WORKDIR, ""]],
+        [[pad("mode", 8), "dim"], [SETTINGS.mode, ""], [mode_note(), "dim"]],
+    ]
+    memory = project_memory()
+    when memory != nothing { rows = push(rows, [[pad("notes", 8), "dim"], [memory.name, ""]]) }
+    you = note_lines(you_file())
+    when SETTINGS.memory and len(you) > 0 { rows = push(rows, [[pad("memory", 8), "dim"], ["{len(you)} things about you", ""], ["  (/me, /memory)", "dim"]]) }
+    custom = custom_commands()
+    when len(custom) > 0 { rows = push(rows, [[pad("own", 8), "dim"], [join(map(custom, c => "/" + c.name), " "), ""]]) }
+    show ""
+    draw_box(rows)
+    show dim("  /help for commands · /model to switch models · /undo to take back changes · Ctrl+C to quit")
+    show ""
+}
+
+to mode_note() {
+    when SETTINGS.mode == "ask" { give "  (asks before edits and commands)" }
+    when SETTINGS.mode == "edits" { give "  (edits freely, asks before commands)" }
+    give "  (works on its own, never asks; /mode ask to approve each step)"
+}

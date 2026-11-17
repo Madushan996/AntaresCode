@@ -1,0 +1,218 @@
+# Antares Code: remembering you and your projects between sessions, while
+# spending as few tokens as possible.
+#
+# Three small files, all plain Markdown you can read and edit:
+#   memory/you.md        facts about you (your name, the languages and tools
+#                        you like, how you like to work), one line each
+#   memory/projects.md   one line per project: where, when, what was done
+#   ANTARES.md           a project's own notes, with its recent work at the end
+#
+# They go into the instructions at the start of each conversation, kept
+# short (a few hundred tokens), so they cost little on every request. When
+# a session ends, one small request (a page of text, not the whole
+# conversation) sums up what was done, and notes anything lasting it
+# learned about you.
+
+MEMORY_LIMIT_YOU = 40           # lines kept about you
+MEMORY_LIMIT_PROJECTS = 30      # projects kept in the list
+MEMORY_LIMIT_RECENT = 5         # recent-work lines kept in a project's notes
+
+to memory_folder() = DATA_DIR + "/memory"
+to you_file() = memory_folder() + "/you.md"
+to projects_file() = memory_folder() + "/projects.md"
+
+to today() {
+    d = now()
+    give "{d.year}-{pad(d.month, 2, "right", "0")}-{pad(d.day, 2, "right", "0")}"
+}
+
+# The "- " lines of a notes file.
+to note_lines(file) {
+    when not exists(file) { give [] }
+    give filter(lines(read(file)), l => begins(l, "- "))
+}
+
+# What is known about you, as text for the instructions (short).
+to user_memory() = squeeze(join(note_lines(you_file()), "\n"), 1500)
+
+# Your other projects, most recent first, as text for the instructions.
+to other_projects() {
+    out = []
+    each l in note_lines(projects_file()) {
+        when not has(lower(l), lower(WORKDIR) + " ·") and len(out) < 6 { out = push(out, l) }
+    }
+    give squeeze(join(out, "\n"), 900)
+}
+
+to same_note(a, b) {
+    x = lower(trim(a))
+    y = lower(trim(b))
+    give x == y or (len(x) > 12 and has(y, x)) or (len(y) > 12 and has(x, y))
+}
+
+# Adds a fact about you (unless it is already there). Gives yes if added.
+to add_user_note(note) {
+    clean = trim(replace(replace(note, "\n", " "), CR, ""))
+    when begins(clean, "- ") { clean = slice(clean, 2) }
+    when clean == "" { give no }
+    old = note_lines(you_file())
+    each l in old {
+        when same_note(slice(l, 2), clean) { give no }
+    }
+    kept = push(old, "- " + clean)
+    when len(kept) > MEMORY_LIMIT_YOU { kept = slice(kept, len(kept) - MEMORY_LIMIT_YOU) }
+    make_folder(memory_folder())
+    write(you_file(), "# About you\n\nWhat Antares Code remembers about you, in every project. Edit or delete lines freely.\n\n" + join(kept, "\n") + "\n")
+    refresh_system_prompt()
+    give yes
+}
+
+# Takes out notes containing some words, about you and in this project's
+# notes. Gives how many went.
+to forget(words) {
+    w = lower(trim(words))
+    when w == "" { give 0 }
+    gone = 0
+    each file in [you_file(), notes_file()] {
+        when exists(file) {
+            kept = []
+            each l in lines(read(file)) {
+                when begins(l, "- ") and has(lower(l), w) {
+                    gone += 1
+                } else {
+                    kept = push(kept, l)
+                }
+            }
+            write(file, join(kept, "\n") + "\n")
+        }
+    }
+    refresh_system_prompt()
+    give gone
+}
+
+# Puts this project at the top of the list of projects, with what was done.
+to note_project(summary) {
+    make_folder(memory_folder())
+    entry = "- {WORKDIR} · {today()} · {one_line(summary, 160)}"
+    rest = filter(note_lines(projects_file()), l => not has(lower(l), lower(WORKDIR) + " ·"))
+    all = [entry]
+    each l in rest {
+        when len(all) < MEMORY_LIMIT_PROJECTS { all = push(all, l) }
+    }
+    write(projects_file(), "# Your projects\n\nThe projects Antares Code has worked on with you, most recent first.\n\n" + join(all, "\n") + "\n")
+}
+
+# Adds a line to the "Recent work" part of this project's notes (keeping
+# the latest few).
+to note_recent_work(summary) {
+    p = notes_file()
+    body = ""
+    when exists(p) { body = read(p) }
+    marker = "## Recent work"
+    head = body
+    recent = []
+    at = find(body, marker)
+    when at >= 0 {
+        head = slice(body, 0, at)
+        recent = filter(lines(slice(body, at)), l => begins(l, "- "))
+    }
+    when trim(head) == "" { head = "# Notes for Antares Code\n\nRead at the start of every session.\n\n" }
+    recent = push(recent, "- {today()}: {one_line(summary, 200)}")
+    when len(recent) > MEMORY_LIMIT_RECENT { recent = slice(recent, len(recent) - MEMORY_LIMIT_RECENT) }
+    snapshot(p)
+    while ends(head, "\n\n") { head = slice(head, 0, len(head) - 1) }
+    when not ends(head, "\n") { head += "\n" }
+    write(p, head + "\n" + marker + "\n\n" + join(recent, "\n") + "\n")
+}
+
+# What a session was about, in a few lines: what you asked, the answers,
+# and the files changed. This, not the whole conversation, is what is sent
+# to be summed up.
+to session_digest() {
+    asked = []
+    answers = []
+    skip_starts = ["Plan mode:", "This is a summary", "I ran this command", "I undid", "Your last reply was cut off", "The plan is approved"]
+    each m in MESSAGES {
+        when m.role == "user" and kind(m.content) == "text" {
+            wanted = len(filter(skip_starts, s => begins(m.content, s))) == 0
+            when wanted { asked = push(asked, "- " + one_line(m.content, 220)) }
+        } else when m.role == "assistant" and kind(m.content) == "text" and trim(m.content) != "" and len(calls_of(m)) == 0 {
+            answers = push(answers, "- " + one_line(m.content, 260))
+        }
+    }
+    when len(asked) > 8 { asked = slice(asked, len(asked) - 8) }
+    when len(answers) > 4 { answers = slice(answers, len(answers) - 4) }
+    changed = unique(map(CHECKPOINTS, c => rel(c.path)))
+    when len(changed) > 15 { changed = slice(changed, 0, 15) }
+    give {asked: asked, answers: answers, changed: changed}
+}
+
+# At the end of a session: sums it up for the project's notes and the list
+# of projects, and notes anything lasting it showed about you.
+to remember_session() {
+    when not SETTINGS.memory or PRINT_MODE or TURN <= REMEMBERED_AT { give nothing }
+    d = session_digest()
+    when len(d.asked) == 0 { give nothing }
+    # a single question that changed nothing isn't worth a request
+    when len(d.asked) < 2 and len(d.changed) == 0 { give nothing }
+    change REMEMBERED_AT = TURN
+    prompt = "This is what happened in a coding session in the folder {WORKDIR}.\n\nThe user asked:\n" + join(d.asked, "\n") + "\n\nThe assistant's last answers:\n" + join(d.answers, "\n")
+    when len(d.changed) > 0 { prompt += "\n\nFiles changed: " + join(d.changed, ", ") }
+    prompt += "\n\nWhat is already known about the user:\n" + user_memory()
+    prompt += "\n\nReply in exactly this form, and nothing else:\nSUMMARY: <one line, at most 20 words: what was done in this session>\nUSER: <a lasting fact about the user that isn't known yet>\nOnly facts the user said about themselves (their name, their work, what they know), or preferences they asked for in so many words (\"always use TypeScript\", \"keep answers short\"). Not guesses from one task: the files or language of this project, or how one question was worded, don't count. One USER line per fact; usually there are none, and then leave USER out. Never secrets, keys or passwords."
+    change SPIN_LABEL = "Remembering"
+    try {
+        r = nv_chat([{role: "user", content: prompt}], no)
+    } else problem {
+        change SPIN_LABEL = "Thinking"
+        give nothing
+    }
+    change SPIN_LABEL = "Thinking"
+    add_usage(r)
+    reply = arg(r.choices[0].message, "content", "")
+    when kind(reply) != "text" { give nothing }
+    summary = ""
+    learned = 0
+    each l in lines(reply) {
+        t = trim(l)
+        when begins(upper(t), "SUMMARY:") { summary = trim(slice(t, 8)) }
+        when begins(upper(t), "USER:") {
+            fact = trim(slice(t, 5))
+            when fact != "" and not has(lower(fact), "none") and add_user_note(fact) { learned += 1 }
+        }
+    }
+    when summary != "" {
+        note_project(summary)
+        note_recent_work(summary)
+        extra = ""
+        when learned > 0 { extra = " · {learned} new thing(s) about you" }
+        show dim("  ✻ Remembered: " + one_line(summary, 100) + extra)
+    }
+}
+
+to show_all_memory() {
+    show ""
+    you = note_lines(you_file())
+    show bold("About you") + dim("  ({rel(you_file())}, used in every project)")
+    when len(you) == 0 { show dim("  Nothing yet. /me <fact> adds one, or it learns as you work.") }
+    each l in you { show "  " + l }
+    show ""
+    m = project_memory()
+    when m == nothing {
+        show bold("This project") + dim("  (no notes yet: /init writes them, /remember <note> adds one)")
+    } else {
+        show bold("This project") + dim("  ({m.name})")
+        each l in lines(m.body) { show "  " + l }
+    }
+    others = other_projects()
+    when others != "" {
+        show ""
+        show bold("Your other projects")
+        each l in lines(others) { show "  " + l }
+    }
+    show ""
+    state_word = "on"
+    when not SETTINGS.memory { state_word = "off" }
+    show dim("  Remembering between sessions is {state_word} (/memory on|off). /forget <words> takes notes out.")
+    show ""
+}
