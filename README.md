@@ -9,6 +9,8 @@ and OpenRouter's free models, and written entirely in
 Created by Madushan Dissanayake with the help of Claude AI, using Madushan's
 own programming language, Antares.
 
+![Antares Code ready to work in a project, listing the tools it can use](docs/tools.png)
+
 Ask for a change in plain words. Antares Code reads your code, edits files,
 runs your tests, servers and commands, searches the web, fixes what fails, and
 tells you what it did. By default it works on its own from start to finish
@@ -108,6 +110,8 @@ The first time, a welcome screen takes you through four short steps:
    or asking before every change.
 4. **Memory**: whether to remember things about you and your projects
    between sessions.
+
+![The welcome screen, at step 1: connect an AI service](docs/welcome.png)
 
 Then it shows a few tips and starts. `/setup` brings the welcome screen back
 to change any of it, `/keys` shows which keys are set, and `/reset` removes
@@ -360,6 +364,81 @@ finished and asks the model to carry on, writing long files in parts with
 
 ## How it is built
 
+Antares Code is a set of Antares files. `antares_code.ant` starts it and
+reads what you type; the agent loop in `lib/agent.ant` sends the conversation
+to the model, runs the tools it asks for, and keeps going until it has an
+answer. Everything you set up and everything it remembers about you is kept
+in your own settings folder, apart from the program.
+
+```mermaid
+flowchart LR
+    you(["You, in the terminal"])
+
+    subgraph app["Antares Code: antares_code.ant, or acode.exe with Antares inside"]
+        start["<b>Start-up and commands</b><br/>antares_code.ant · commands.ant<br/>setup.ant (welcome screen, /reset)<br/>update.ant (/update)"]
+        agent["<b>Agent loop</b><br/>agent.ant<br/>system prompt, plan mode,<br/>helper agents, summarising"]
+        api["<b>Model requests</b><br/>api.ant<br/>keys, model lists, retries"]
+        tools["<b>Tools</b><br/>tools.ant · web.ant<br/>processes.ant · history.ant"]
+        mem["<b>Memory</b><br/>memory.ant"]
+        ui["<b>Screen</b><br/>ui.ant<br/>boxes, diffs, the star"]
+    end
+
+    subgraph services["Model services (OpenAI-style chat)"]
+        nvidia["NVIDIA"]
+        gemini["Google Gemini"]
+        openrouter["OpenRouter, free models"]
+    end
+
+    project[("Your project folder<br/>files, git, ANTARES.md")]
+    data[("~/.antares-code<br/>keys, settings, memory,<br/>saved conversations")]
+    ddg["DuckDuckGo"]
+    github["GitHub releases"]
+
+    you <--> start
+    start --> agent
+    agent --> api
+    agent --> tools
+    agent --> mem
+    agent -.-> ui
+    api -- "curl in the background" --> services
+    tools -- "read, edit, run, undo" --> project
+    tools -- "web search" --> ddg
+    mem --> data
+    mem --> project
+    start -- "keys and settings" --> data
+    start -- "new versions" --> github
+```
+
+One request, from your words to its answer. It calls NVIDIA's, Gemini's or
+OpenRouter's OpenAI-style chat API with tool definitions, runs the tools the
+model asks for, and sends back the results until the model has finished:
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant Agent as agent.ant
+    participant API as api.ant
+    participant Model as Model service
+    participant Tools as tools.ant
+    participant Project as Your project
+
+    You->>Agent: a request in plain words
+    loop until the model answers without asking for a tool
+        Agent->>API: the conversation and the tool definitions
+        API->>Model: chat request (the star twinkles meanwhile)
+        Model-->>API: a reply, or tool calls
+        API-->>Agent: the reply
+        Agent->>Tools: each tool call
+        Tools->>Project: read, edit, run, search
+        Note over Tools,Project: files are kept as they were first, for /undo
+        Project-->>Tools: results
+        Tools-->>Agent: results, sent back to the model
+    end
+    Agent-->>You: the answer, time, tokens and files changed
+```
+
+The files:
+
 | File | What it does |
 |---|---|
 | `antares_code.ant` | Start-up, the command line, the welcome screen and the prompt |
@@ -380,10 +459,7 @@ finished and asks the model to carry on, writing long files in parts with
 | `lib/guide.ant` | The Antares guide as part of the program (made from `lib/antares_guide.md` by `build.ant`) |
 | `build.ant` | Builds `dist/acode.exe`, with its icon |
 | `tests/check.ant` | Checks every tool without calling a model: `antares tests/check.ant` |
-
-It calls NVIDIA's, Gemini's or OpenRouter's OpenAI-style chat API with tool definitions,
-runs the tools the model asks for, and sends back the results until the model
-has finished.
+| `docs/` | The pictures in this README |
 
 ## Limits
 
