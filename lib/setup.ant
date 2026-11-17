@@ -77,6 +77,33 @@ to suggested_models(p, ids) {
     give out
 }
 
+# The models offered at step 2 of the welcome screen, grouped by service.
+# lists: [{p, ids}] for each service with a key, in welcome order; fresh: the
+# services connected just now. Those come first, so that Enter picks one of
+# theirs: connecting NVIDIA and pressing Enter must give an NVIDIA model,
+# not the same model on OpenRouter. With nothing just connected, Enter keeps
+# the model in use. Gives {groups: [{p, ids}], options, first} (first: the
+# option Enter picks, from 0).
+to model_choices(lists, fresh, current) {
+    ordered = filter(lists, l => has(fresh, l.p))
+    each l in lists {
+        when not has(fresh, l.p) { ordered = push(ordered, l) }
+    }
+    groups = []
+    options = []
+    each l in ordered {
+        picks = suggested_models(l.p, l.ids)
+        when provider_of(current) == l.p and not has(picks, current) { picks = push(picks, current) }
+        when len(picks) > 0 {
+            groups = push(groups, {p: l.p, ids: picks})
+            each id in picks { options = push(options, id) }
+        }
+    }
+    first = 0
+    when len(fresh) == 0 and has(options, current) { first = place_in(options, current) }
+    give {groups: groups, options: options, first: first}
+}
+
 # ---------- the welcome screen ----------
 
 # What each service is, for someone choosing, and how to get its key.
@@ -210,41 +237,56 @@ to run_setup(first) {
 
     # ---- 2. a model
     step_title(2, total, "Choose a model")
-    options = []
+    lists = []
+    fresh = []
     each w in WELCOME {
         when has_key(w.p) {
             ids = []
             when has(models, w.p) {
                 ids = models[w.p]
+                fresh = push(fresh, w.p)
             } else {
                 try { ids = provider_models(w.p, KEYS[w.p]) } else problem { ids = [] }
             }
-            each id in suggested_models(w.p, ids) { options = push(options, id) }
+            lists = push(lists, {p: w.p, ids: ids})
         }
     }
     current = SETTINGS.model_id
-    # the model in use, if it isn't among them
-    when has_key(provider_of(current)) and not has(options, current) { options = push(options, current) }
+    choice = model_choices(lists, fresh, current)
+    options = choice.options
     when len(options) > 0 {
         show "  These are quick and good at coding. You can switch any time with /model."
-        show ""
-        each i in range(len(options)) {
-            id = options[i]
-            note = ""
-            when i == 0 { note = green("  recommended") }
-            when provider_of(id) == "gemini" and has(lower(id), "pro") { note += dim("  thinks harder; few free requests") }
-            when id == current { note += dim("  (in use)") }
-            show "   " + brand("{i + 1}") + "  " + pad(id, 46) + dim(provider_name(provider_of(id))) + note
+        bases = []
+        twice = no
+        each id in options {
+            when has(bases, base_model(id)) { twice = yes }
+            bases = push(bases, base_model(id))
+        }
+        when twice { show dim("  Some models are offered by two services; each runs on the service it is listed under.") }
+        n = 0
+        each g in choice.groups {
+            show ""
+            heading = "  " + bold(provider_name(g.p))
+            when has(fresh, g.p) { heading += dim("  (just connected)") }
+            show heading
+            each id in g.ids {
+                note = ""
+                when n == choice.first and len(fresh) > 0 { note = green("  recommended") }
+                when provider_of(id) == "gemini" and has(lower(id), "pro") { note += dim("  thinks harder; few free requests") }
+                when id == current { note += dim("  (in use)") }
+                n += 1
+                show "  " + brand(pad(n, 2)) + "  " + pad(id, 48) + note
+            }
         }
         show ""
-        answer = answer_to(brand("  Type a number (Enter: 1) › "))
-        pick = options[0]
+        answer = answer_to(brand("  Type a number (Enter: {choice.first + 1}) › "))
+        pick = options[choice.first]
         when answer != nothing and answer != "" {
             n = number_or_nothing(answer)
             when n != nothing and n >= 1 and n <= len(options) and n == floor(n) { pick = options[n - 1] }
         }
         set_setting("model_id", pick)
-        show "  " + green("✓ ") + "Using " + bold(pick)
+        show "  " + green("✓ ") + "Using " + bold(pick) + dim(" on {provider_name(provider_of(pick))}")
     }
     change MODEL_LIST = []
 

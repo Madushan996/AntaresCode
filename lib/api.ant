@@ -29,6 +29,34 @@ to provider_of(id) {
 to provider() = provider_of(SETTINGS.model_id)
 to provider_name(p) = PROVIDERS[p].name
 
+# Where x is in a list (from 0), or -1.
+to place_in(xs, x) {
+    each i in range(len(xs)) {
+        when xs[i] == x { give i }
+    }
+    give -1
+}
+
+# The same model can be offered by more than one service: NVIDIA's
+# "nvidia/nemotron-3-ultra-550b-a55b" is OpenRouter's
+# "nvidia/nemotron-3-ultra-550b-a55b:free". (The "nvidia/" at the front is
+# who made the model, not the service it runs on.)
+to base_model(id) {
+    when ends(text(id), ":free") { give slice(text(id), 0, len(text(id)) - 5) }
+    give text(id)
+}
+
+# The same model on another service you have a key for, or nothing.
+to same_model_elsewhere(id, known) {
+    base = base_model(id)
+    when provider_of(id) == "openrouter" {
+        when has_key("nvidia") and (has(known, base) or has(RECOMMENDED, base)) { give base }
+        give nothing
+    }
+    when provider_of(id) == "nvidia" and has_key("openrouter") and has(known, base + ":free") { give base + ":free" }
+    give nothing
+}
+
 # ---------- keys ----------
 # Keys come from the environment (NVIDIA_API_KEY, GEMINI_API_KEY), or from
 # keys.json in your own settings folder (set up with /setup), never from the
@@ -111,8 +139,11 @@ to explain_problem(problem) {
     } else when has(problem, "error 404") {
         give "The model {SETTINGS.model_id} isn't available right now. Pick another with /model."
     } else when has(problem, "error 429") {
-        when provider() == "openrouter" { give "Too many requests: OpenRouter's free models allow about 20 requests a minute and 50 a day (1000 a day once you've added $10 of credit). Wait a while, or switch service with /model." }
-        give "Too many requests: {name}'s free tier is rate limited. Wait a moment and try again, or switch service with /model."
+        alt = same_model_elsewhere(SETTINGS.model_id, MODEL_LIST)
+        elsewhere = ""
+        when alt != nothing { elsewhere = " The same model is on {provider_name(provider_of(alt))}: /model {alt}" }
+        when provider() == "openrouter" { give "Too many requests: OpenRouter's free models allow about 20 requests a minute and 50 a day (1000 a day once you've added $10 of credit). Wait a while, or switch service with /model." + elsewhere }
+        give "Too many requests: {name}'s free tier is rate limited. Wait a moment and try again, or switch service with /model." + elsewhere
     } else when has(low, "timed out") {
         give "The model took longer than {SETTINGS.timeout} s to answer. It may be busy: try again, or pick another with /model."
     } else when has(problem, "error 400") {

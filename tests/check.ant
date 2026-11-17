@@ -229,6 +229,26 @@ s = SETTINGS
 s.color = no
 SETTINGS = s
 
+# the same model on two services
+check(base_model("nvidia/nemotron-3-ultra-550b-a55b:free") == "nvidia/nemotron-3-ultra-550b-a55b" and base_model("gemini-3.8-flash") == "gemini-3.8-flash", "base_model")
+check(provider_of("nvidia/nemotron-3-ultra-550b-a55b") == "nvidia" and provider_of("nvidia/nemotron-3-ultra-550b-a55b:free") == "openrouter", "the service is told apart by :free, not by the maker")
+check(place_in(["a", "b"], "b") == 1 and place_in(["a"], "z") == -1, "place_in")
+saved_keys = KEYS
+KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: "sk-or-test"}
+check(same_model_elsewhere("nvidia/nemotron-3-ultra-550b-a55b:free", []) == "nvidia/nemotron-3-ultra-550b-a55b", "an OpenRouter model's NVIDIA twin")
+check(same_model_elsewhere("nvidia/nemotron-3-ultra-550b-a55b", ["nvidia/nemotron-3-ultra-550b-a55b:free"]) == "nvidia/nemotron-3-ultra-550b-a55b:free", "an NVIDIA model's OpenRouter twin")
+check(same_model_elsewhere("cohere/north-mini-code:free", []) == nothing, "no twin")
+# step 2 of the welcome screen: OpenRouter was set up before, NVIDIA is connected now
+lists = [{p: "openrouter", ids: ["cohere/north-mini-code:free", "nvidia/nemotron-3-ultra-550b-a55b:free"]}, {p: "nvidia", ids: ["nvidia/nemotron-3-ultra-550b-a55b", "poolside/laguna-xs-2.1"]}]
+c = model_choices(lists, ["nvidia"], "cohere/north-mini-code:free")
+check(c.groups[0].p == "nvidia" and c.first == 0 and c.options[c.first] == "nvidia/nemotron-3-ultra-550b-a55b", "a service connected just now comes first, and Enter picks its model: {c.options}")
+check(has(c.options, "cohere/north-mini-code:free") and c.groups[1].p == "openrouter", "the other service's models are still offered")
+c = model_choices(lists, [], "cohere/north-mini-code:free")
+check(c.options[c.first] == "cohere/north-mini-code:free", "with nothing new connected, Enter keeps the model in use")
+c = model_choices(lists, [], "poolside/laguna-xs-2.1")
+check(c.options[c.first] == "poolside/laguna-xs-2.1" and c.groups[0].p == "openrouter", "keeping the model in use, wherever it is listed")
+KEYS = saved_keys
+
 # new versions
 check(is_newer("v2.1.0", "2.0.0") and is_newer("2.10.0", "2.9.9") and is_newer("v3", "2.9") and not is_newer("v2.1.0", "2.1.0") and not is_newer("2.0.9", "2.1"), "comparing versions")
 check(version_numbers("v2.10.1") == [2, 10, 1], "version_numbers")

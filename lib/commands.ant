@@ -193,7 +193,8 @@ to pick_model(choice) {
     when len(matches) == 1 { give matches[0] }
     when len(matches) > 1 {
         show yellow("  \"{c}\" matches {len(matches)} models:")
-        each m in matches { show "    " + m }
+        each m in matches { show "    " + dim(pad(place_in(ids, m) + 1, 3) + ".") + " " + pad(m, 48) + dim(provider_name(provider_of(m))) }
+        show dim("  Type /model and the number of the one you want.")
         give nothing
     }
     parts = split(c, "/")
