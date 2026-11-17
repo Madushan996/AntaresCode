@@ -22,8 +22,11 @@ SETTINGS = s
 # the tests keep their own settings folder, away from yours
 DATA_DIR = replace(HOME, "\\", "/") + "/data"
 
-# a scratch project to work in
-base = replace(HOME, "\\", "/") + "/scratch"
+# a scratch project to work in, outside this repository (so its .gitignore
+# doesn't hide the project from the search tools)
+tmp = env("TEMP")
+when tmp == nothing or trim(tmp) == "" { tmp = "/tmp" }
+base = replace(tmp, "\\", "/") + "/antares-code-check"
 when exists(base) {
     when WINDOWS { shell("rmdir /s /q \"" + native(base) + "\"") } else { shell("rm -rf \"" + base + "\"") }
 }
