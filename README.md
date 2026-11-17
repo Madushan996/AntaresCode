@@ -9,7 +9,7 @@ and OpenRouter's free models, and written entirely in
 Created by Madushan Dissanayake with the help of Claude AI, using Madushan's
 own programming language, Antares.
 
-![Antares Code ready to work in a project, listing the tools it can use](docs/tools.png)
+![Antares Code on an NVIDIA model adding a "done" command to a small to-do app: it reads the code, edits it, adds a test, runs the tests and tries the command](docs/session.png)
 
 Ask for a change in plain words. Antares Code reads your code, edits files,
 runs your tests, servers and commands, searches the web, fixes what fails, and
@@ -105,7 +105,12 @@ The first time, a welcome screen takes you through four short steps:
    For each, it shows how to get a key and opens the page in your browser
    when you press Enter; paste the key, and it is checked with the service
    straight away.
-2. **Choose a model**: the recommended ones are listed; Enter takes the first.
+2. **Choose a model**: good ones are listed under each service, and Enter
+   takes the recommended one from the service you just connected. Some
+   models are offered by two services (NVIDIA's
+   `nvidia/nemotron-3-ultra-550b-a55b` is OpenRouter's
+   `nvidia/nemotron-3-ultra-550b-a55b:free`); a model runs on the service it
+   is listed under.
 3. **How it should work**: on its own (the default), asking before commands,
    or asking before every change.
 4. **Memory**: whether to remember things about you and your projects
@@ -208,6 +213,8 @@ Explain $ARGUMENTS to a beginner in five short bullet points.
 Then `/explain src/parser.py` sends that request.
 
 ## Tools the model can use
+
+![The tools, as /tools lists them](docs/tools.png)
 
 | Tool | Shown as | What it does | Asks first (in `/mode ask`) |
 |---|---|---|---|
