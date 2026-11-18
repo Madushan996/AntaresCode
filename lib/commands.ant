@@ -329,7 +329,7 @@ to command_resume() {
         change TODOS = arg(s, "todos", [])
         show green("  Carrying on the last conversation ({len(msgs)} messages).")
         each m in msgs {
-            when m.role == "user" and kind(m.content) == "text" and not begins(m.content, "This is a summary") {
+            when m.role == "user" and kind(m.content) == "text" and not begins(m.content, "This is a summary") and not begins(m.content, FINISH_NOTE) {
                 show dim("  › " + one_line(m.content, 100))
             }
         }

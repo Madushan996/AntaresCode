@@ -396,6 +396,78 @@ TEST_REPLIES = nothing
 MODEL_HEALTH = {}
 ACTIVE_MODEL = nothing
 
+# ---------- tool-call JSON as models really send it ----------
+q = char(34)
+bs = char(92)
+to tool_call(args) = {function: {name: "x", arguments: args}}
+check(inputs_of(tool_call("```json\n\{" + q + "path" + q + ": " + q + "a.py" + q + "}\n```")) == {path: "a.py"}, "JSON in a code fence")
+check(inputs_of(tool_call("Here you go: \{" + q + "path" + q + ": " + q + "a.py" + q + "} hope that helps")) == {path: "a.py"}, "words around the JSON")
+check(inputs_of(tool_call("\{'path': 'it" + bs + "'s " + q + "here" + q + ".py'}")) == {path: "it's " + q + "here" + q + ".py"}, "single-quoted strings")
+check(inputs_of(tool_call("\{" + q + "all" + q + ": True, " + q + "x" + q + ": None, " + q + "n" + q + ": 1e3}")) == {all: yes, x: nothing, n: 1000}, "True, None and numbers")
+check(inputs_of(tool_call("\{" + q + "s" + q + ": " + q + bs + "u00e9t" + bs + "u00e9 " + bs + "u2192 " + bs + "ud83d" + bs + "ude00" + q + "}")).s == "été → 😀", "\\u escapes become their characters: {inputs_of(tool_call("\{" + q + "s" + q + ": " + q + bs + "u00e9" + q + "}"))}")
+check(inputs_of(tool_call("\{" + q + "s" + q + ": " + q + bs + "u0022" + bs + "u005c" + q + "}")).s == q + bs, "escaped quotes and backslashes stay escaped")
+check(inputs_of(tool_call("\{" + q + "path" + q + ": " + q + "C:" + bs + "Users" + bs + "me" + bs + "d.txt" + q + "}")).path == "C:" + bs + "Users" + bs + "me" + bs + "d.txt", "backslashes of unknown escapes are kept: {inputs_of(tool_call("\{" + q + "path" + q + ": " + q + "C:" + bs + "Users" + q + "}"))}")
+check(inputs_of(tool_call("\{" + q + "s" + q + ": " + q + "a" + bs + "nb" + bs + "t" + bs + q + "c" + bs + bs + q + "}")).s == "a\nb\t" + q + "c" + bs, "valid escapes mean the same")
+check(inputs_of(tool_call("\{" + q + "s" + q + ": " + q + "line one\nline two" + q + "}")).s == "line one\nline two", "raw newlines in strings")
+check(inputs_of(tool_call("\{" + q + "a" + q + ": [1, \{" + q + "b" + q + ": " + q + "}]" + q + "}], " + q + "c" + q + ": 2}")) == {a: [1, {b: "}]"}], c: 2}, "brackets inside strings don't end the object")
+check(inputs_of(tool_call("\{" + q + "path" + q + ": " + q + "a.py" + q + ", " + q + "content" + q + ": " + q + "print(1")) == nothing, "cut-off JSON is still refused")
+check(repair_json("no json here") == nothing, "no object at all")
+
+# ---------- the check before finishing ----------
+g = new_gate()
+check(finish_check(g, "Here is how it works.") == [], "nothing to check after a plain answer")
+g = track_step(g, "read_file", {path: "a.py"}, "1 x")
+check(finish_check(g, "Done.") == [], "reading isn't changing")
+g = track_step(g, "edit_file", {path: "src/a.py"}, "Updated src/a.py")
+g = track_step(g, "edit_file", {path: "README.md"}, "Updated README.md")
+check(g.unchecked == ["src/a.py"] and len(finish_check(g, "Done.")) == 1 and has(finish_check(g, "Done.")[0].short, "src/a.py changed, not run since"), "code changed and not run: {finish_check(g, "Done.")}")
+g2 = track_step(g, "run_command", {command: "python -m unittest"}, "OK\n[exit code 0]")
+check(finish_check(g2, "Done.") == [], "running it clears the check")
+g3 = track_step(g, "run_command", {command: "python -m unittest"}, "FAILED\n[exit code 1]")
+check(has(finish_check(g3, "Done.")[0].long, "exited with code 1"), "a failed run is named")
+g4 = track_step(g3, "edit_file", {path: "src/a.py"}, "Updated src/a.py")
+check(g4.failed == "" and len(g4.unchecked) == 1, "a change after a failure: the failure is over, but it isn't run yet")
+check(finish_check(track_step(g, "run_command", {command: "x"}, "The user said no."), "Done.") == [], "after the user says no, nothing is checked")
+g5 = g
+g5.checked = yes
+check(finish_check(g5, "Done.") == [], "only once a request")
+check(promises_more("I found the bug. Now I'll run the tests.") and promises_more("Let me check the config.") and not promises_more("Let me know if you want more.") and not promises_more("Should I run it?") and not promises_more("All tests pass."), "promising more work")
+check(len(finish_check(new_gate(), "Next, I'll update the parser.")) == 1, "a promise alone is checked")
+check(exit_code_in("x\n[exit code 2]") == 2 and exit_code_in("none") == nothing, "exit_code_in")
+
+# a whole request: the model writes code and tries to finish without running it
+s = SETTINGS
+s.model_id = "nvidia/main-model"
+s.fallbacks = []
+SETTINGS = s
+KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: nothing, tavily: nothing}
+to scripted_call(name, args) = to_json({choices: [{message: {role: "assistant", content: "", tool_calls: [{id: "c_" + name, type: "function", function: {name: name, arguments: to_json(args)}}]}, finish_reason: "tool_calls"}], usage: {prompt_tokens: 10, completion_tokens: 5}})
+to scripted_text(t) = to_json({choices: [{message: {role: "assistant", content: t}, finish_reason: "stop"}], usage: {prompt_tokens: 10, completion_tokens: 5}})
+start_conversation()
+TEST_REPLIES = {"nvidia/main-model": [scripted_call("write_file", {path: "gate_demo.py", content: "print(6 * 7)\n"}), scripted_text("Done: gate_demo.py prints 42."), scripted_call("run_command", {command: "python gate_demo.py"}), scripted_text("It prints 42.")]}
+check(agent_turn("make gate_demo.py print 42") == yes, "the request finishes")
+nudges = filter(MESSAGES, m => m.role == "user" and kind(m.content) == "text" and begins(m.content, FINISH_NOTE))
+check(len(nudges) == 1 and has(nudges[0].content, "gate_demo.py"), "the model was sent back once, naming the file: {len(nudges)}")
+check(len(TEST_REPLIES["nvidia/main-model"]) == 0, "it carried on and ran the file")
+# when it ran what it changed, it isn't sent back
+start_conversation()
+TEST_REPLIES = {"nvidia/main-model": [scripted_call("write_file", {path: "gate_demo.py", content: "print(1)\n"}), scripted_call("run_command", {command: "python gate_demo.py"}), scripted_text("Prints 1.")]}
+agent_turn("make it print 1")
+check(len(filter(MESSAGES, m => m.role == "user" and begins(text(m.content), FINISH_NOTE))) == 0, "no check when the change was run")
+# and it is sent back only once, even if it still won't run anything
+start_conversation()
+TEST_REPLIES = {"nvidia/main-model": [scripted_call("write_file", {path: "gate_demo.py", content: "print(2)\n"}), scripted_text("Done."), scripted_text("There is nothing to run here.")]}
+check(agent_turn("make it print 2") == yes and len(filter(MESSAGES, m => m.role == "user" and begins(text(m.content), FINISH_NOTE))) == 1, "only one check a request")
+TEST_REPLIES = nothing
+start_conversation()
+
+# a command stopped by its time limit says so
+slow = "sleep 5"
+when WINDOWS { slow = "ping -n 6 127.0.0.1" }
+r = run_tool("run_command", {command: slow, timeout: 1})
+check(has(r, "stopped after 1 s") and has(r, "start_process"), "a timed-out command says so: {one_line(r, 200)}")
+check(not has(run_tool("run_command", {command: "echo quick"}), "stopped after"), "a quick command doesn't")
+
 when WINDOWS { shell("rmdir /s /q \"" + native(base) + "\"") } else { shell("rm -rf \"" + base + "\"") }
 when WINDOWS { shell("rmdir /s /q \"" + native(DATA_DIR) + "\"") } else { shell("rm -rf \"" + DATA_DIR + "\"") }
 show "Antares Code tools: all checks passed"

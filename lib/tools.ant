@@ -513,15 +513,27 @@ to tool_bash(a) {
     when len(words) > 0 { first_word = words[0] }
     ok = permitted("command", "command:" + first_word, "run " + first_word + " commands")
     when not ok.ok { give refused(ok) }
+    started = clock()
     r = shell(cmd, {folder: WORKDIR, timeout: seconds})
     out = r.output
     when r.errors != "" {
         when out != "" { out += "\n" }
         out += r.errors
     }
-    when r.code == 0 { result_line(dim("exit code 0")) } else { result_line(red("exit code {r.code}")) }
+    # stopped by the time limit (Antares gives code -1): say so, or the
+    # model only sees an exit code and guesses why
+    timed_out = r.code == -1 and clock() - started >= seconds - 0.5
+    when timed_out {
+        result_line(red("stopped after {seconds} s (time limit)"))
+    } else when r.code == 0 {
+        result_line(dim("exit code 0"))
+    } else {
+        result_line(red("exit code {r.code}"))
+    }
     when out != "" { preview(out, 6) }
-    give squeeze(out, 30000) + "\n[exit code {r.code}]"
+    note = ""
+    when timed_out { note = "\n[stopped after {seconds} s: it was still running when the time limit came, and the output above is what it printed until then. If it keeps running by design (a server, a watcher, a game), use start_process instead; if it is just slow, run it again with a longer timeout.]" }
+    give squeeze(out, 30000) + note + "\n[exit code {r.code}]"
 }
 
 to tool_fetch(a) {

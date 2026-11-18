@@ -285,6 +285,26 @@ won't run destructive commands (deleting files you didn't mention,
 asks you (with `ask_user`) only when a request is too unclear to guess. Up to
 200 rounds of tools are allowed for one task.
 
+**A check before it finishes.** Free models often stop too soon. So when a
+request is about to end, Antares Code checks three things: code was changed
+and nothing was run since (changes to `.md` and `.txt` files don't count),
+the last step failed and nothing fixed it, or the reply ends by promising
+more ("Now I'll run the tests") without doing it. If any is true, the model
+is sent back once, told what is missing, and either carries on or says in a
+line why not:
+
+```
+  ✻ Not finishing yet: app.py changed, not run since
+```
+
+It happens at most once per request, never after you turn a step down, and
+never in `/plan`. Plain answers to questions aren't checked.
+
+**Commands that run out of time.** A command still running at its time limit
+(120 s unless the model asks for more) is stopped. The model is told so, with
+what it printed until then, and is advised to use `start_process` for
+something that keeps running, or a longer limit for something slow.
+
 `/mode ask` makes it ask before every edit and command, and `/mode edits`
 only before commands. When it asks, answer `y` (yes), `a` (yes, and don't ask
 again this session: for edits, or for commands starting with the same word,
@@ -449,6 +469,18 @@ Replies may be up to 32,768 tokens (`/max` changes it; the model's thinking
 counts too). If a reply is still cut off, Antares Code keeps whatever was
 finished and asks the model to carry on, writing long files in parts with
 `append_file`.
+
+## Tool calls that aren't quite JSON
+
+Each model gets tool-call JSON wrong in its own way, and with backups one task
+can see several models. So before a tool call is read, Antares Code repairs:
+`json` code fences and words around the object, `'single-quoted'` strings,
+Python's `True`, `False` and `None`, and raw line breaks inside strings. It
+also turns `\u00e9`-style escapes into the characters they stand for, and
+keeps the backslash of an escape JSON doesn't have, so `"C:\Users"` stays
+`C:\Users`. (Antares's `json()` would read the first as `u00e9` and the
+second as `C:Users`.) A call that was cut off is still refused, rather than
+half a file being written.
 
 ## How it is built
 

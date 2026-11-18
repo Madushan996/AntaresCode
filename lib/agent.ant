@@ -209,19 +209,252 @@ to calls_of(msg) {
     give msg.tool_calls
 }
 
-# The inputs of a tool call, as a map.
+# The inputs of a tool call, as a map, or nothing if they can't be read.
+# Models get JSON wrong in ways that differ from one model to the next (and
+# with backups, one task can see several), so the text is repaired first;
+# see repair_json.
 to inputs_of(call) {
     raw = arg(call.function, "arguments", "")
     when kind(raw) == "map" { give raw }
     when kind(raw) != "text" or trim(raw) == "" { give {} }
+    fixed_text = repair_json(raw)
+    when fixed_text == nothing { fixed_text = raw }
     try {
-        parsed = json(raw)
+        parsed = json(fixed_text)
         when kind(parsed) == "map" { give parsed }
         give {}
     } else problem {
         give nothing
     }
 }
+
+HEX_DIGITS = "0123456789abcdef"
+
+# The number written in hexadecimal ("00e9" gives 233), or nothing.
+to hex_value(t) {
+    n = 0
+    each c in lower(t) {
+        d = find(HEX_DIGITS, c)
+        when d < 0 { give nothing }
+        n = n * 16 + d
+    }
+    give n
+}
+
+# A character as it may stand inside a JSON string read by Antares: quotes,
+# backslashes and control characters escaped, the rest as it is.
+to json_char(n) {
+    when n == 34 { give "\\\"" }
+    when n == 92 { give "\\\\" }
+    when n == 10 { give "\\n" }
+    when n == 9 { give "\\t" }
+    when n == 13 { give "\\r" }
+    when n < 32 { give " " }
+    give char(n)
+}
+
+# Tool-call JSON as models really send it, made into JSON that Antares reads
+# correctly, or nothing if it is cut off (a reply that hit the length limit:
+# better dropped than half a file written). It
+#   - takes away ```json fences, and words before or after the object;
+#   - reads 'single-quoted' strings, and True, False and None;
+#   - writes \uXXXX escapes as the characters they stand for (Antares's
+#     json() doesn't read them: \u00e9 would come out as "u00e9");
+#   - keeps the backslash of an escape JSON doesn't have ("C:\Users" would
+#     otherwise come out as "C:Users");
+#   - escapes raw control characters inside strings.
+# Valid JSON comes out meaning the same.
+to repair_json(raw) {
+    t = trim(raw)
+    when begins(t, "```") {
+        nl = find(t, "\n")
+        when nl < 0 { give nothing }
+        t = trim(slice(t, nl + 1))
+        when ends(t, "```") { t = trim(slice(t, 0, len(t) - 3)) }
+    }
+    start = find(t, "\{")
+    when start < 0 { give nothing }
+    when start > 0 { t = slice(t, start) }
+    bs = char(92)
+    out = ""
+    depth = 0
+    quote = ""            # the quote that opened the string we are in, or ""
+    escaping = no         # just after a backslash, in a string
+    hex = nothing         # the hex digits of a \u escape so far, or nothing
+    high = nothing        # the first half of a surrogate pair, waiting
+    word = ""             # a bare word outside strings (true, None, ...)
+    done = no
+    each c in t {
+        when done {
+            skip
+        }
+        when quote == "" {
+            # outside strings
+            when has("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", c) {
+                word += c
+                skip
+            }
+            when word != "" {
+                when word == "True" { word = "true" } else when word == "False" { word = "false" } else when word == "None" { word = "null" }
+                out += word
+                word = ""
+            }
+            when c == "\"" or c == "'" {
+                quote = c
+                out += "\""
+            } else when c == "\{" or c == "[" {
+                depth += 1
+                out += c
+            } else when c == "}" or c == "]" {
+                depth -= 1
+                out += c
+                when depth == 0 { done = yes }
+            } else {
+                out += c
+            }
+            skip
+        }
+        # inside a string
+        when hex != nothing {
+            hex += c
+            when len(hex) < 4 { skip }
+            n = hex_value(hex)
+            when n == nothing {
+                # not an escape after all: keep it as it was written
+                out += bs + bs + "u" + hex
+            } else when n >= 55296 and n <= 56319 {
+                high = n
+            } else when n >= 56320 and n <= 57343 and high != nothing {
+                out += json_char(65536 + (high - 55296) * 1024 + (n - 56320))
+                high = nothing
+            } else {
+                out += json_char(n)
+            }
+            hex = nothing
+            skip
+        }
+        when escaping {
+            escaping = no
+            when c == "u" {
+                hex = ""
+            } else when c == "'" and quote == "'" {
+                out += "'"
+            } else when has("\"\\/bfnrt", c) {
+                out += bs + c
+            } else {
+                out += bs + bs + c
+            }
+            skip
+        }
+        when c == bs {
+            escaping = yes
+        } else when c == quote {
+            quote = ""
+            out += "\""
+        } else when c == "\"" {
+            # a double quote inside a 'single-quoted' string
+            out += bs + "\""
+        } else {
+            k = code(c)
+            when k < 32 { out += json_char(k) } else { out += c }
+        }
+    }
+    when not done or quote != "" { give nothing }
+    give out
+}
+
+# ---------- the check before finishing ----------
+# Free models often stop too soon: they change code and finish without
+# running it, finish right after a step failed, or end with "Now I'll run
+# the tests" and no tool call. When a request ends like that, the model is
+# sent back once, with what is missing; it can carry on, or say in a line
+# why not. Purely conversational answers aren't checked.
+
+CHANGE_TOOLS = ["edit_file", "multi_edit", "write_file", "append_file"]
+RUN_TOOLS = ["run_command", "start_process"]
+# changes to these don't need running
+NOT_CODE = [".md", ".txt", ".rst", ".csv", ".log"]
+FINISH_NOTE = "[Antares Code, before you finish] "
+
+to new_gate() = {checked: no, unchecked: [], failed: "", declined: no}
+
+to is_code_file(p) {
+    low = lower(text(p))
+    each e in NOT_CODE {
+        when ends(low, e) { give no }
+    }
+    give yes
+}
+
+# The exit code at the end of a command's result ("[exit code 2]"), or nothing.
+to exit_code_in(result) {
+    at = find(result, "[exit code ")
+    when at < 0 { give nothing }
+    rest = slice(result, at + 11)
+    close = find(rest, "]")
+    when close < 0 { give nothing }
+    give number_or_nothing(slice(rest, 0, close))
+}
+
+# What a tool call tells the check: files changed and not run since, a step
+# that failed, or the user turning a step down (then nothing is checked).
+to track_step(g, name, a, result) {
+    when begins(result, "The user") or begins(result, "This needs the user's") {
+        g.declined = yes
+        give g
+    }
+    when begins(result, "Not run") or has(READ_ONLY, name) { give g }
+    code_seen = nothing
+    when has(RUN_TOOLS, name) { code_seen = exit_code_in(result) }
+    when begins(result, "Error") {
+        g.failed = name + ": " + one_line(slice(result, 6), 100)
+        give g
+    }
+    when code_seen != nothing and code_seen != 0 {
+        g.failed = "`" + one_line(text(arg(a, "command", name)), 80) + "` exited with code {code_seen}"
+        g.unchecked = []
+        give g
+    }
+    g.failed = ""
+    when has(CHANGE_TOOLS, name) {
+        p = text(arg(a, "path", ""))
+        when is_code_file(p) and not has(g.unchecked, p) { g.unchecked = push(g.unchecked, p) }
+    } else when has(RUN_TOOLS, name) {
+        g.unchecked = []
+    }
+    give g
+}
+
+# Whether a reply ends by promising more work instead of doing it.
+to promises_more(content) {
+    when kind(content) != "text" { give no }
+    t = lower(trim(content))
+    when ends(t, "?") { give no }
+    when len(t) > 160 { t = slice(t, len(t) - 160) }
+    each p in ["i'll now", "i will now", "now i'll", "now i will", "next, i'll", "next i'll", "now let me", "let me now", "i'm going to", "i am going to", "let's now", "now let's"] {
+        when has(t, p) { give yes }
+    }
+    when has(t, "let me ") and not has(t, "let me know") { give yes }
+    give no
+}
+
+# What is missing before the model may finish: [{short, long}], or [] (also
+# when it was already sent back once in this request).
+to finish_check(g, content) {
+    when g.checked or g.declined or PLANNING { give [] }
+    out = []
+    when g.failed != "" {
+        out = push(out, {short: "the last step failed", long: "the last step failed ({g.failed}) and nothing after it fixed that"})
+    } else when len(g.unchecked) > 0 {
+        shown = join(map(slice(g.unchecked, 0, min(3, len(g.unchecked))), p => rel(full_path(p))), ", ")
+        when len(g.unchecked) > 3 { shown += " and {len(g.unchecked) - 3} more" }
+        out = push(out, {short: "{shown} changed, not run since", long: "you changed {shown} but haven't run anything since to check it (the tests, the build or the program)"})
+    }
+    when promises_more(content) { out = push(out, {short: "it said it would do more", long: "your reply says you'll do more, but you didn't call a tool"}) }
+    give out
+}
+
+to finish_prompt(reasons) = FINISH_NOTE + "Not quite done: " + join(map(reasons, r => r.long), "; ") + ". If there is more to do, carry on now with your tools. If not (nothing can be run, or it isn't needed), say why in one line and finish. (This check comes once per request.)"
 
 # One turn: the user's message, then as many model replies and tool calls
 # as it takes. Gives yes if it finished normally.
@@ -255,6 +488,7 @@ to agent_turn(user_text) {
     change MESSAGES = push(MESSAGES, {role: "user", content: user_text})
     steps = 0
     cut_offs = 0
+    gate = new_gate()
     while yes {
         steps += 1
         when steps > MAX_STEPS {
@@ -330,6 +564,13 @@ to agent_turn(user_text) {
         when len(calls) > 0 { reply.tool_calls = calls }
         change MESSAGES = push(MESSAGES, reply)
         when len(calls) == 0 and not was_cut {
+            reasons = finish_check(gate, content)
+            when len(reasons) > 0 {
+                gate.checked = yes
+                show dim("  ✻ Not finishing yet: " + join(map(reasons, r => r.short), "; "))
+                change MESSAGES = push(MESSAGES, {role: "user", content: finish_prompt(reasons)})
+                skip
+            }
             save_session()
             give yes
         }
@@ -365,6 +606,7 @@ to agent_turn(user_text) {
                     when has(READ_ONLY, name) { looks = push(looks, same) }
                 }
             }
+            when not stopping and a != nothing { gate = track_step(gate, name, a, result) }
             when not stopping {
                 when begins(result, "Error") or begins(result, "Not run") {
                     fails += 1
