@@ -20,6 +20,8 @@ CR = char(13)               # a carriage return (Antares has no \r escape)
 # settings kept between runs, in settings.json next to the program
 SETTINGS = {
     model_id: "nvidia/nemotron-3-ultra-550b-a55b",
+    fallbacks: [],          # up to 4 backup models, tried in order when the model is busy, rate limited or failing
+    switch_after: 120,      # seconds to wait for a model before moving on to a backup (when there is one)
     mode: "yolo",           # yolo (never ask, work autonomously) | edits | ask
     thinking: no,           # show the model's reasoning
     max_tokens: 32768,      # the longest reply allowed (thinking counts too)
@@ -37,7 +39,13 @@ WORKDIR = "."
 MESSAGES = []               # the conversation, in the OpenAI chat format
 TODOS = []                  # the model's task list
 ALWAYS = []                 # what the user allowed for the rest of the session
-USAGE = {input: 0, output: 0, calls: 0}
+USAGE = {input: 0, output: 0, calls: 0, estimated: 0, failures: 0, switches: 0, by_model: {}}   # tokens used this session, in all and by model
+SESSION_STARTED = clock()   # when this session began (seconds)
+ACTIVE_MODEL = nothing      # the model that answered last (the first in the chain, or a backup)
+TRYING = nothing            # the model a request is being sent to now
+MODEL_HEALTH = {}           # by model: {until, strikes, reason}: a model that failed rests until `until`
+SKIP_ASKED = no             # Tab was pressed while waiting: move on to the next model
+TEST_REPLIES = nothing      # tests only: scripted replies by model, instead of calling a service
 MODEL_LIST = []             # the chat models NVIDIA offers, once fetched
 HAS_RG = no                 # ripgrep is installed: faster search
 IN_GIT = no

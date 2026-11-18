@@ -130,30 +130,6 @@ to auth_headers_for(p) {
     give h
 }
 
-# A problem from a service, in words that say what to do.
-to explain_problem(problem) {
-    name = provider_name(provider())
-    low = lower(problem)
-    when has(problem, "error 401") or has(problem, "error 403") or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") {
-        give "{name} didn't accept the API key. /setup enters it again."
-    } else when has(problem, "error 402") {
-        give "{name} says this needs credit. Antares Code offers only OpenRouter's free models: pick one with /model."
-    } else when has(problem, "error 404") {
-        give "The model {SETTINGS.model_id} isn't available right now. Pick another with /model."
-    } else when has(problem, "error 429") {
-        alt = same_model_elsewhere(SETTINGS.model_id, MODEL_LIST)
-        elsewhere = ""
-        when alt != nothing { elsewhere = " The same model is on {provider_name(provider_of(alt))}: /model {alt}" }
-        when provider() == "openrouter" { give "Too many requests: OpenRouter's free models allow about 20 requests a minute and 50 a day (1000 a day once you've added $10 of credit). Wait a while, or switch service with /model." + elsewhere }
-        give "Too many requests: {name}'s free tier is rate limited. Wait a moment and try again, or switch service with /model." + elsewhere
-    } else when has(low, "timed out") {
-        give "The model took longer than {SETTINGS.timeout} s to answer. It may be busy: try again, or pick another with /model."
-    } else when has(problem, "error 400") {
-        give "The model refused the request: {problem}\n(Some models don't support tools; /model lists ones that do.)"
-    }
-    give problem
-}
-
 # ---------- a request while the star twinkles ----------
 # Antares waits for a request to finish before doing anything else, so to
 # animate while the model thinks, the request runs on its own: curl is
@@ -164,17 +140,33 @@ to explain_problem(problem) {
 
 to request_folder() = DATA_DIR + "/.request"
 
-# Sends `body` to the current service's chat API and gives the reply's
-# text, showing the waiting line meanwhile (and clearing it after).
-to post_chat(body) {
-    p = provider()
+# Tests only: the next scripted reply for a model (TEST_REPLIES), as the
+# reply's text; "FAIL ..." fails with the rest, as a service would.
+to scripted_reply(id) {
+    when kind(TEST_REPLIES) != "map" or not has(TEST_REPLIES, id) or len(TEST_REPLIES[id]) == 0 { fail("couldn't reach the test service: no reply scripted for {id}") }
+    t = TEST_REPLIES
+    next = t[id][0]
+    t[id] = slice(t[id], 1)
+    change TEST_REPLIES = t
+    when kind(next) == "text" and begins(next, "FAIL ") { fail(slice(next, 5)) }
+    when kind(next) == "text" { give next }
+    give to_json(next)
+}
+
+# Sends `body` to model `id`'s service and gives the reply's text, showing
+# the waiting line meanwhile (and clearing it after). It gives up after
+# `limit` seconds. With `can_skip`, Tab gives up at once (another model is
+# ready to take over).
+to post_chat(id, body, limit, can_skip) {
+    p = provider_of(id)
     when not has_key(p) { fail("there is no {provider_name(p)} API key: /setup adds one") }
+    when TEST_REPLIES != nothing { give scripted_reply(id) }
     url = PROVIDERS[p].base + "/chat/completions"
     name = provider_name(p)
     when not SETTINGS.color or PRINT_MODE or not WINDOWS {
         show waiting_text()
         try {
-            reply = fetch(url, {headers: auth_headers_for(p), body: body, timeout: SETTINGS.timeout})
+            reply = fetch(url, {headers: auth_headers_for(p), body: body, timeout: limit})
         } else problem {
             erase_line()
             fail(problem)
@@ -185,7 +177,7 @@ to post_chat(body) {
     dir = request_folder()
     make_folder(dir)
     files = {}
-    each f in ["body.json", "key.cfg", "reply.json", "code.txt", "errors.txt", "go.cmd", "go.js"] {
+    each f in ["body.json", "key.cfg", "reply.json", "headers.txt", "code.txt", "errors.txt", "go.cmd", "go.js"] {
         files[f] = native(dir + "/" + f)
         when exists(files[f]) { delete(files[f]) }
     }
@@ -193,13 +185,14 @@ to post_chat(body) {
     extra = ""
     when p == "openrouter" { extra = "header = \"X-Title: Antares Code\"\n" }
     write(files["key.cfg"], "header = \"Authorization: Bearer {KEYS[p]}\"\nheader = \"Content-Type: application/json\"\nheader = \"Accept: application/json\"\n" + extra)
-    # in a .cmd file, % is written %%
-    curl = "@curl -s -S -X POST \"{url}\" -K \"{files["key.cfg"]}\" --data-binary \"@{files["body.json"]}\" -o \"{files["reply.json"]}\" -w \"%%\{http_code}\" --max-time {SETTINGS.timeout}"
+    # in a .cmd file, % is written %%; the headers are kept for Retry-After
+    curl = "@curl -s -S -X POST \"{url}\" -K \"{files["key.cfg"]}\" --data-binary \"@{files["body.json"]}\" -o \"{files["reply.json"]}\" -D \"{files["headers.txt"]}\" -w \"%%\{http_code}\" --max-time {round(limit)}"
     write(files["go.cmd"], curl + " > \"{files["code.txt"]}\" 2> \"{files["errors.txt"]}\"" + CR + "\n@del \"{files["key.cfg"]}\"" + CR + "\n")
     write(files["go.js"], "new ActiveXObject(\"WScript.Shell\").Run('\"" + replace(files["go.cmd"], "\\", "\\\\") + "\"', 0, false);\n")
     started = clock()
     frame = 0
-    spinner_start()
+    change SKIP_ASKED = no
+    spinner_start(can_skip)
     launched = shell("cscript //nologo \"" + files["go.js"] + "\"", {timeout: 30})
     when launched.code != 0 {
         spinner_stop()
@@ -215,9 +208,15 @@ to post_chat(body) {
             stop_request(dir)
             fail(STOPPED)
         }
-        when clock() - started > SETTINGS.timeout + 20 {
+        when can_skip and SKIP_ASKED {
             spinner_stop()
-            fail("the request timed out after {SETTINGS.timeout} s")
+            stop_request(dir)
+            fail("skipped with Tab after {round(clock() - started)} s")
+        }
+        when clock() - started > limit + 20 {
+            spinner_stop()
+            stop_request(dir)
+            fail("the request timed out after {round(limit)} s")
         }
     }
     spinner_stop()
@@ -225,23 +224,29 @@ to post_chat(body) {
     code = trim(read(files["code.txt"]))
     reply = ""
     when exists(files["reply.json"]) { reply = read(files["reply.json"]) }
+    headers = ""
+    when exists(files["headers.txt"]) { headers = read(files["headers.txt"]) }
     errors = ""
     when exists(files["errors.txt"]) { errors = trim(read(files["errors.txt"])) }
     # what was sent and received isn't kept
-    each f in ["body.json", "reply.json"] {
+    each f in ["body.json", "reply.json", "headers.txt"] {
         when exists(files[f]) { delete(files[f]) }
     }
     n = number_or_nothing(code)
     when n == nothing or n == 0 {
-        when has(lower(errors), "timed out") { fail("the request timed out after {SETTINGS.timeout} s") }
+        when has(lower(errors), "timed out") { fail("the request timed out after {round(limit)} s") }
         fail("couldn't reach {name}: " + one_line(errors, 300))
     }
-    when n >= 400 { fail("error {n} from {name}: " + one_line(reply, 500)) }
+    when n >= 400 {
+        # how long the service asked us to wait, before the reply is shortened
+        hint = retry_hint(headers + " " + reply)
+        wait_note = ""
+        when hint != nothing { wait_note = " (retry-after {round(hint)} s)" }
+        fail("error {n} from {name}{wait_note}: " + one_line(reply, 500))
+    }
     give reply
 }
 
-# Sends a chat request, trying again when the service is busy. `tools` is
-# yes (all of them), no (none) or a list of tool descriptions.
 # Ends a request still running in the background (after Esc), so that its
 # answer can't turn up as the answer to the next one.
 to stop_request(dir) {
@@ -257,8 +262,302 @@ to stop_request(dir) {
     }
 }
 
+# A problem from a service, in words that say what to do.
+to explain_problem(problem) {
+    id = failing_model()
+    name = provider_name(provider_of(id))
+    # every model failed: each one is already named, with why
+    when begins(text(problem), "Every model failed") { give problem }
+    low = lower(problem)
+    backups = ""
+    when len(model_chain()) == 1 { backups = " Backup models (/fallback auto) let it switch by itself next time." }
+    when has(problem, "error 401") or has(problem, "error 403") or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") {
+        give "{name} didn't accept the API key. /setup enters it again."
+    } else when has(problem, "error 402") {
+        give "{name} says this needs credit. Antares Code offers only OpenRouter's free models: pick one with /model."
+    } else when has(problem, "error 404") {
+        give "The model {id} isn't available right now. Pick another with /model." + backups
+    } else when has(problem, "error 429") {
+        alt = same_model_elsewhere(id, MODEL_LIST)
+        elsewhere = ""
+        when alt != nothing { elsewhere = " The same model is on {provider_name(provider_of(alt))}: /model {alt}" }
+        when provider_of(id) == "openrouter" { give "Too many requests: OpenRouter's free models allow about 20 requests a minute and 50 a day (1000 a day once you've added $10 of credit). Wait a while, or switch service with /model." + elsewhere + backups }
+        give "Too many requests: {name}'s free tier is rate limited. Wait a moment and try again, or switch service with /model." + elsewhere + backups
+    } else when has(low, "timed out") {
+        give "The model took too long to answer. It may be busy: try again, or pick another with /model." + backups
+    } else when has(problem, "error 400") {
+        give "The model refused the request: {problem}\n(Some models don't support tools; /model lists ones that do.)"
+    }
+    give problem
+}
+
+# ---------- the chain of models ----------
+# Free models are often busy or rate limited, so up to five can be chosen:
+# the model (SETTINGS.model_id) and up to four backups (SETTINGS.fallbacks).
+# Each request goes to the first of them that isn't resting. One that fails
+# (rate limited, busy, too slow, a broken or empty reply) rests for a while,
+# longer each time it fails again (or as long as the service asks), and the
+# request moves on to the next at once, so the work carries on. A model that
+# has rested is tried first again.
+
+MAX_MODELS = 5
+MAX_PAUSE = 90       # the longest wait for a resting model, when every model is resting
+
+# The models in the order they are tried.
+to model_chain() {
+    chain = [SETTINGS.model_id]
+    fb = SETTINGS.fallbacks
+    when kind(fb) != "list" { fb = [] }
+    each id in fb {
+        when kind(id) == "text" and trim(id) != "" and not has(chain, id) and len(chain) < MAX_MODELS { chain = push(chain, id) }
+    }
+    give chain
+}
+
+# The model doing the work: the one that answered last, if it's still in the chain.
+to current_model() {
+    when ACTIVE_MODEL != nothing and has(model_chain(), ACTIVE_MODEL) { give ACTIVE_MODEL }
+    give SETTINGS.model_id
+}
+
+# The model shown while waiting, and named in problems.
+to failing_model() {
+    when TRYING != nothing { give TRYING }
+    give current_model()
+}
+
+to health_of(id) {
+    when has(MODEL_HEALTH, id) { give MODEL_HEALTH[id] }
+    give {until: 0, strikes: 0, reason: "", short: no}
+}
+
+to set_health(id, h) {
+    m = MODEL_HEALTH
+    m[id] = h
+    change MODEL_HEALTH = m
+}
+
+# Seconds until a model has rested (0 if it's ready).
+to rest_left(id) = max(0, health_of(id).until - clock())
+
+# Lets a model be tried again at once (after /model or /fallback reset).
+to forgive(id) {
+    h = health_of(id)
+    set_health(id, {until: 0, strikes: 0, reason: "", short: h.short})
+}
+
+# "34 s", "5 min", "2 h"
+to how_long(seconds) {
+    s = max(1, round(seconds))
+    when s < 120 { give "{s} s" }
+    when s < 7200 { give "{round(s / 60)} min" }
+    give "{round(s / 3600)} h"
+}
+
+# The HTTP status in a problem ("error 429 from ..."), or 0.
+to status_of(problem) {
+    t = text(problem)
+    at = find(t, "error ")
+    while at >= 0 {
+        n = number_or_nothing(slice(t, at + 6, min(at + 9, len(t))))
+        when n != nothing and n >= 100 and n <= 599 and n == floor(n) { give n }
+        t = slice(t, at + 6)
+        at = find(t, "error ")
+    }
+    give 0
+}
+
+# The number just after a word in a text ("retryDelay": "37s" gives 37), or nothing.
+to number_after(t, marker) {
+    at = find(lower(t), lower(marker))
+    when at < 0 { give nothing }
+    i = at + len(marker)
+    gap = 0
+    while i < len(t) and gap < 8 and not has("0123456789", slice(t, i, i + 1)) {
+        i += 1
+        gap += 1
+    }
+    j = i
+    while j < len(t) and has("0123456789.", slice(t, j, j + 1)) { j += 1 }
+    when j == i { give nothing }
+    give number_or_nothing(slice(t, i, j))
+}
+
+# How long a service asked us to wait, in seconds, or nothing: a Retry-After
+# header, Gemini's retryDelay, "try again in 20s", or OpenRouter's
+# X-RateLimit-Reset (a time, in milliseconds).
+to retry_hint(t) {
+    each m in ["retry-after", "retryDelay", "retry in", "retry after", "try again in"] {
+        n = number_after(t, m)
+        when n != nothing and n > 0 and n < 86400 { give n }
+    }
+    reset = number_after(t, "x-ratelimit-reset")
+    when reset != nothing {
+        when reset > 1000000000000 { reset = reset / 1000 }
+        when reset > 1000000000 and reset - clock() > 0 { give min(reset - clock(), 86400) }
+    }
+    give nothing
+}
+
+# A rest that doubles with each failure in a row.
+to backoff(base, strikes) = min(base * 2 ^ max(strikes, 0), 900)
+
+# What went wrong with a request: {kind, reason, rest, final}. `rest` is how
+# long the model should rest (seconds); `final` means asking it again won't
+# help (a key it doesn't accept, a model that's gone, a refused request).
+to failure_of(problem, strikes) {
+    low = lower(text(problem))
+    n = status_of(problem)
+    hint = retry_hint(text(problem))
+    when has(problem, STOPPED) { give {kind: "stopped", reason: "stopped", rest: 0, final: yes} }
+    when has(low, "skipped with tab") { give {kind: "skipped", reason: "skipped (Tab)", rest: 60, final: no} }
+    when n == 401 or n == 403 or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") { give {kind: "key", reason: "the key wasn't accepted", rest: 86400, final: yes} }
+    when n == 402 { give {kind: "key", reason: "needs credit", rest: 86400, final: yes} }
+    when n == 404 { give {kind: "gone", reason: "not available", rest: 86400, final: yes} }
+    when n == 429 or has(low, "rate limit") or has(low, "resource_exhausted") or has(low, "too many requests") {
+        daily = has(low, "per-day") or has(low, "per day") or has(low, "daily") or has(low, "perday")
+        rest = backoff(10, strikes)
+        reason = "rate limited"
+        when daily {
+            rest = 3600
+            reason = "daily limit reached"
+        }
+        # a daily limit's own reset time, but not the per-minute retry
+        # delay some services give with it
+        when hint != nothing and (not daily or hint > 600) { rest = max(hint, 2) }
+        give {kind: "limit", reason: reason, rest: rest, final: no}
+    }
+    when has(low, "timed out") or n == 408 or n == 504 or n == 524 { give {kind: "timeout", reason: "too slow: timed out", rest: backoff(60, strikes), final: no} }
+    when n == 400 or n == 413 or n == 422 {
+        reason = "refused the request"
+        when n == 413 or has(low, "context") or has(low, "too long") or has(low, "too many tokens") { reason = "the conversation is too long for it" } else when has(low, "tool") { reason = "refused the tools" }
+        give {kind: "refused", reason: reason, rest: 300, final: yes}
+    }
+    when n >= 500 { give {kind: "busy", reason: "busy (error {n})", rest: backoff(5, strikes), final: no} }
+    when has(low, "bad reply") {
+        reason = "a broken reply"
+        when has(low, "empty") { reason = "an empty reply" }
+        give {kind: "faulty", reason: reason, rest: backoff(5, strikes), final: no}
+    }
+    when has(low, "couldn't reach") { give {kind: "net", reason: "couldn't be reached", rest: backoff(5, strikes), final: no} }
+    give {kind: "other", reason: one_line(text(problem), 60), rest: backoff(10, strikes), final: no}
+}
+
+# What is wrong with a reply that came back (as JSON), or nothing: some free
+# models answer "200 OK" with an error inside, no answer, or an empty one.
+to reply_fault(r) {
+    when kind(r) != "map" { give "it wasn't a JSON object" }
+    when has(r, "error") and r.error != nothing {
+        e = r.error
+        code = ""
+        when kind(e) == "map" and has(e, "code") and e.code != nothing { code = "error {e.code} " }
+        give code + "in the reply: " + one_line(to_json(e), 300)
+    }
+    when not has(r, "choices") or kind(r.choices) != "list" or len(r.choices) == 0 { give "it held no answer" }
+    c = r.choices[0]
+    when kind(c) != "map" or not has(c, "message") or kind(c.message) != "map" { give "it held no message" }
+    finish = text(arg(c, "finish_reason", ""))
+    when finish == "error" { give "the model stopped with an error" }
+    content = arg(c.message, "content", "")
+    calls = calls_of(c.message)
+    when (kind(content) != "text" or trim(content) == "") and len(calls) == 0 and finish != "length" { give "it was empty" }
+    give nothing
+}
+
+# The first model in the chain, not tried yet in this request, that isn't resting.
+to next_model(chain, tried) {
+    each id in chain {
+        when not has(tried, id) and rest_left(id) == 0 { give id }
+    }
+    give nothing
+}
+
+# The model, not tried yet, whose rest ends first (or nothing).
+to soonest_untried(chain, tried) {
+    best = nothing
+    each id in chain {
+        when not has(tried, id) and (best == nothing or rest_left(id) < rest_left(best)) { best = id }
+    }
+    give best
+}
+
+# Seconds until the first model in the chain has rested.
+to soonest_free(chain) {
+    best = nothing
+    each id in chain {
+        when best == nothing or rest_left(id) < best { best = rest_left(id) }
+    }
+    give best
+}
+
+# Every model failed, or is resting: each, and why.
+to all_failed(chain) {
+    out = "Every model failed or is resting:"
+    each id in chain {
+        h = health_of(id)
+        why = h.reason
+        when why == "" { why = "ready" }
+        left = rest_left(id)
+        when left > 0 { why += " (free again in {how_long(left)})" }
+        out += "\n    {id}: {why}"
+    }
+    give out + "\n  /fallback shows them, /fallback add puts in another, /fallback reset tries them all again now."
+}
+
+# Counts a request's tokens, for the model that answered. A service that
+# doesn't say how many it used gets an estimate (about 4 characters a token).
+to note_usage(id, r, sent) {
+    u = USAGE
+    per = u.by_model
+    m = arg(per, id, {input: 0, output: 0, calls: 0, failures: 0, estimated: 0})
+    ins = nothing
+    outs = nothing
+    used = arg(r, "usage", nothing)
+    when kind(used) == "map" {
+        ins = arg(used, "prompt_tokens", arg(used, "input_tokens", nothing))
+        outs = arg(used, "completion_tokens", arg(used, "output_tokens", nothing))
+    }
+    guessed = no
+    when kind(ins) != "number" {
+        ins = floor(len(to_json(sent.messages)) / 4) + floor(len(to_json(arg(sent, "tools", []))) / 4)
+        guessed = yes
+    }
+    when kind(outs) != "number" {
+        outs = floor(len(to_json(r.choices[0].message)) / 4)
+        guessed = yes
+    }
+    when guessed {
+        u.estimated += 1
+        m.estimated += 1
+    }
+    u.input += ins
+    u.output += outs
+    u.calls += 1
+    m.input += ins
+    m.output += outs
+    m.calls += 1
+    per[id] = m
+    u.by_model = per
+    change USAGE = u
+}
+
+to note_failure(id) {
+    u = USAGE
+    per = u.by_model
+    m = arg(per, id, {input: 0, output: 0, calls: 0, failures: 0, estimated: 0})
+    m.failures += 1
+    u.failures += 1
+    per[id] = m
+    u.by_model = per
+    change USAGE = u
+}
+
+# Sends a chat request to the chain of models: the first that isn't resting,
+# and on to the next when one fails. With only one model, it waits and tries
+# that one again when the service is busy. `tools` is yes (all of them), no
+# (none) or a list of tool descriptions.
 to nv_chat(messages, tools) {
-    body = {"model": SETTINGS.model_id, messages: messages, max_tokens: SETTINGS.max_tokens, temperature: SETTINGS.temperature}
+    body = {messages: messages, max_tokens: SETTINGS.max_tokens, temperature: SETTINGS.temperature}
     specs = []
     when kind(tools) == "list" {
         specs = tools
@@ -269,23 +568,93 @@ to nv_chat(messages, tools) {
         body.tools = specs
         body.tool_choice = "auto"
     }
-    attempt = 0
+    chain = filter(model_chain(), id => has_key(provider_of(id)))
+    when len(chain) == 0 { fail("there is no {provider_name(provider())} API key: /setup adds one") }
+    single = len(chain) == 1
+    before = ACTIVE_MODEL
+    tried = []
+    failed = 0
+    last_problem = ""
+    pauses = 0
     while yes {
-        attempt += 1
+        id = next_model(chain, tried)
+        # all resting, and none tried yet: try the one that is free soonest
+        # rather than give up without asking any
+        when id == nothing and failed == 0 { id = soonest_untried(chain, tried) }
+        when id == nothing {
+            wait_for = soonest_free(chain)
+            pauses += 1
+            when pauses > 2 or wait_for > MAX_PAUSE {
+                when single and last_problem != "" { fail(last_problem) }
+                fail(all_failed(chain))
+            }
+            secs = max(1, round(wait_for + 0.5))
+            when single {
+                show dim("  (the service is busy; trying again in {secs} s)")
+            } else {
+                show dim("  (every model is resting; trying again in {secs} s · Esc stops)")
+            }
+            when wait_or_stop(secs) { fail(STOPPED) }
+            tried = []
+            skip
+        }
+        tried = push(tried, id)
+        when failed == 0 and before != nothing and id != before and has(chain, before) and place_in(chain, id) < place_in(chain, before) {
+            show dim("  ↩ {id} has rested; back to it")
+        }
+        h = health_of(id)
+        sent = body
+        sent["model"] = id
+        when h.short and sent.max_tokens > 8192 { sent.max_tokens = 8192 }
+        # with a backup ready, don't wait the whole timeout for a slow model
+        others = len(filter(chain, c => not has(tried, c) and rest_left(c) == 0)) > 0
+        limit = SETTINGS.timeout
+        when others { limit = min(SETTINGS.switch_after, SETTINGS.timeout) }
+        change TRYING = id
+        r = nothing
         try {
-            give json(post_chat(body))
+            raw = post_chat(id, sent, limit, others)
+            try { r = json(raw) } else problem { fail("bad reply from {provider_name(provider_of(id))}: it wasn't JSON: " + one_line(raw, 200)) }
+            fault = reply_fault(r)
+            when fault != nothing { fail("bad reply from {provider_name(provider_of(id))}: " + fault) }
         } else problem {
-            # a model that won't give replies this long: ask for a shorter one
-            when has(problem, "error 400") and has(lower(problem), "max_tokens") and body.max_tokens > 8192 {
-                body.max_tokens = 8192
+            when has(problem, STOPPED) { fail(STOPPED) }
+            # a model that won't give replies this long: ask it for a shorter one
+            when has(problem, "error 400") and has(lower(problem), "max_tokens") and sent.max_tokens > 8192 {
+                h.short = yes
+                set_health(id, h)
                 show dim("  (this model allows shorter replies; using 8192 tokens)")
+                tried = filter(tried, t => t != id)
                 skip
             }
-            busy = has(problem, "error 429") or has(problem, "error 500") or has(problem, "error 502") or has(problem, "error 503") or has(problem, "error 504")
-            when not busy or attempt >= 3 { fail(problem) }
-            show dim("  (the service is busy; trying again in {attempt * 3} s)")
-            when wait_or_stop(attempt * 3) { fail(STOPPED) }
+            f = failure_of(problem, h.strikes)
+            last_problem = problem
+            failed += 1
+            set_health(id, {until: clock() + f.rest, strikes: h.strikes + 1, reason: f.reason, short: h.short})
+            note_failure(id)
+            when single {
+                when f.final or f.kind == "timeout" { fail(problem) }
+                skip
+            }
+            nxt = next_model(chain, tried)
+            when nxt != nothing {
+                show yellow("  ↪ {id}: {f.reason}") + dim(" · switching to {nxt}")
+            } else {
+                show yellow("  ↪ {id}: {f.reason}")
+            }
+            skip
         }
+        note_usage(id, r, sent)
+        set_health(id, {until: 0, strikes: 0, reason: "", short: h.short})
+        when failed > 0 {
+            u = USAGE
+            u.switches += 1
+            change USAGE = u
+        }
+        change ACTIVE_MODEL = id
+        change TRYING = nothing
+        r["served_by"] = id
+        give r
     }
 }
 
@@ -367,7 +736,11 @@ to test_model(id) {
         tools_ok = has(msg, "tool_calls") and msg.tool_calls != nothing and len(msg.tool_calls) > 0
         give {ok: yes, tools: tools_ok, seconds: clock() - t0, problem: ""}
     } else problem {
+        # explained for the model being tested
+        was = TRYING
+        change TRYING = id
         why = explain_problem(problem)
+        change TRYING = was
         when has(problem, "timed out") { why = "it didn't answer within 45 s (busy, or switched off for now)." }
         give {ok: no, tools: no, seconds: clock() - t0, problem: why}
     }

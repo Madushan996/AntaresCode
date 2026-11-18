@@ -290,6 +290,25 @@ to run_setup(first) {
         }
         set_setting("model_id", pick)
         show "  " + green("✓ ") + "Using " + bold(pick) + dim(" on {provider_name(provider_of(pick))}")
+        # backups: the other suggestions, other services first (a rate limit
+        # is per service)
+        spare = filter(options, id => id != pick and provider_of(id) != provider_of(pick))
+        each id in options {
+            when id != pick and not has(spare, id) { spare = push(spare, id) }
+        }
+        spare = slice(spare, 0, min(len(spare), MAX_MODELS - 1))
+        when len(spare) > 0 {
+            show ""
+            show "  Free models are often busy or rate limited. With backups, when one is, the next"
+            show "  takes over by itself and the work carries on. Suggested: " + join(spare, ", ")
+            answer = answer_to(brand("  Use these as backups? (Enter: yes, n: no) › "))
+            when answer == nothing or not has(["n", "no"], lower(answer)) {
+                set_fallbacks(spare)
+                show "  " + green("✓ ") + "{len(spare)} backup(s)" + dim(" (/fallback changes them)")
+            } else {
+                set_fallbacks([])
+            }
+        }
     }
     change MODEL_LIST = []
 

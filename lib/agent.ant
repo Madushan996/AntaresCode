@@ -162,16 +162,6 @@ to start_conversation() {
 # A rough count of the tokens in the conversation (about 4 characters each).
 to conversation_tokens() = floor(len(to_json(MESSAGES)) / 4)
 
-to add_usage(r) {
-    u = USAGE
-    u.calls += 1
-    when has(r, "usage") and r.usage != nothing {
-        u.input += arg(r.usage, "prompt_tokens", 0)
-        u.output += arg(r.usage, "completion_tokens", 0)
-    }
-    change USAGE = u
-}
-
 # Replaces the conversation with a summary of it, to make room.
 to compact(note) {
     show dim("  ✻ Summarising the conversation to make room…")
@@ -180,7 +170,6 @@ to compact(note) {
     try {
         r = nv_chat(asked, no)
         change SPIN_LABEL = "Thinking"
-        add_usage(r)
         summary = arg(r.choices[0].message, "content", "")
         when trim(summary) == "" { fail("the model gave an empty summary") }
         change MESSAGES = [
@@ -297,7 +286,6 @@ to agent_turn(user_text) {
             give no
         }
         took = clock() - t0
-        add_usage(r)
         when not has(r, "choices") or len(r.choices) == 0 {
             show red("  The service sent back no answer: " + one_line(to_json(r), 300))
             give no
@@ -413,9 +401,24 @@ to timed_turn(user_text) {
     tokens_in = USAGE.input - before.input
     tokens_out = USAGE.output - before.output
     changed = len(filter(CHECKPOINTS, c => c.turn == TURN))
-    note = "✻ {fixed(took, 1)} s · {tokens_in} tokens in, {tokens_out} out"
+    note = "✻ {fixed(took, 1)} s · {grouped(tokens_in)} tokens in, {grouped(tokens_out)} out"
+    # the backups that answered, if any did
+    helpers = filter(models_used_since(before), id => id != SETTINGS.model_id)
+    when len(helpers) > 0 { note += " · via " + join(helpers, ", ") }
     when changed > 0 { note += " · {changed} file(s) changed (/diff, /undo)" }
+    note += " · session {short_tokens(USAGE.input + USAGE.output)} (/usage)"
     show dim("  " + note)
+}
+
+# The models that answered a request since `before` (an earlier USAGE).
+to models_used_since(before) {
+    out = []
+    each id in keys(USAGE.by_model) {
+        was = 0
+        when has(before.by_model, id) { was = before.by_model[id].calls }
+        when USAGE.by_model[id].calls > was { out = push(out, id) }
+    }
+    give out
 }
 
 # ---------- plan mode ----------
@@ -476,7 +479,6 @@ to tool_task(a) {
             change SPIN_LABEL = "Thinking"
             fail("the helper couldn't reach the model: " + explain_problem(problem))
         }
-        add_usage(r)
         msg = r.choices[0].message
         calls = calls_of(msg)
         content = arg(msg, "content", "")

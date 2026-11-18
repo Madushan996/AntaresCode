@@ -70,6 +70,9 @@ to show_help() {
         ["/model <number or name>", "switch model (part of a name, words in any order)"],
         ["/models [word]", "list the chat models (refreshed), optionally only those containing a word"],
         ["/test [number or name]", "check that a model answers and can use tools"],
+        ["/fallback", "backup models (up to 5 in all), used by themselves when one is busy or rate limited"],
+        ["/fallback add|rm|auto", "add backups (numbers or names), take one out, or pick good ones for you"],
+        ["/usage", "tokens used this session, in all and by model"],
         ["/mode yolo|edits|ask", "never ask, work on its own (default) / edit freely, ask for commands / ask before edits and commands"],
         ["/clear", "start a new conversation"],
         ["/compact [note]", "summarise the conversation to make room"],
@@ -83,7 +86,7 @@ to show_help() {
         ["/processes", "programs running in the background; /stop <number> stops one"],
         ["/export [file]", "save the conversation as a Markdown file"],
         ["/todos", "show the task list"],
-        ["/status", "model, folder, mode and tokens used"],
+        ["/status", "models, folder, mode and tokens used"],
         ["/thinking", "show or hide the model's reasoning"],
         ["/max <tokens>", "the longest reply allowed"],
         ["/cd <folder>", "work in another folder"],
@@ -112,6 +115,8 @@ to model_line(i, id) {
     when id == SETTINGS.model_id { mark = brand("● ") }
     star = ""
     when recommended(id) { star = brand("  ★ recommended") }
+    at = place_in(model_chain(), id)
+    when at > 0 { star += dim("  backup {at}") }
     give "  " + mark + dim(pad(i, 3) + ".") + " " + id + star
 }
 
@@ -234,7 +239,11 @@ to switch_model(id) {
         show dim("  ✓ answered in {fixed(t.seconds, 1)} s and used a tool correctly")
     }
     set_setting("model_id", id)
+    when has(SETTINGS.fallbacks, id) { set_fallbacks(SETTINGS.fallbacks) }
+    forgive(id)
+    change ACTIVE_MODEL = nothing
     show green("  Now using {id}") + dim(" from {provider_name(provider_of(id))} (saved for next time)")
+    when len(model_chain()) > 1 { show dim("  Backups: " + join(slice(model_chain(), 1), ", ") + " (/fallback)") }
 }
 
 to command_model(rest) {
@@ -278,11 +287,14 @@ to command_test(rest) {
 to command_status() {
     show ""
     show "  " + dim(pad("Model", 12)) + SETTINGS.model_id + dim("  " + provider_name(provider()))
+    chain = model_chain()
+    each i in range(1, len(chain)) { show "  " + dim(pad("Backup {i}", 12)) + chain[i] + dim("  " + provider_name(provider_of(chain[i]))) }
+    when current_model() != SETTINGS.model_id { show "  " + dim(pad("In use", 12)) + current_model() + dim("  (the last to answer)") }
     show "  " + dim(pad("Keys", 12)) + join(map(PROVIDER_ORDER, p => provider_name(p) + " " + masked(KEYS[p])), dim(" · "))
     show "  " + dim(pad("Folder", 12)) + WORKDIR
     show "  " + dim(pad("Mode", 12)) + SETTINGS.mode
     show "  " + dim(pad("Context", 12)) + "about {conversation_tokens()} tokens ({len(MESSAGES)} messages; summarised at {SETTINGS.compact_at})"
-    show "  " + dim(pad("Used", 12)) + "{USAGE.input} tokens in, {USAGE.output} out, {USAGE.calls} requests"
+    show "  " + dim(pad("Used", 12)) + "{grouped(USAGE.input + USAGE.output)} tokens ({grouped(USAGE.input)} in, {grouped(USAGE.output)} out), {USAGE.calls} requests" + dim("  (/usage for each model)")
     finder = "built-in tools (install ripgrep for faster search)"
     when HAS_RG { finder = "ripgrep" }
     show "  " + dim(pad("Search", 12)) + finder
@@ -449,6 +461,10 @@ to run_command_line(l) {
         list_models(rest, yes)
     } else when cmd == "/test" {
         command_test(rest)
+    } else when cmd == "/fallback" or cmd == "/fallbacks" or cmd == "/backup" or cmd == "/backups" {
+        command_fallback(rest)
+    } else when cmd == "/usage" or cmd == "/tokens" or cmd == "/cost" {
+        command_usage()
     } else when cmd == "/mode" {
         command_mode(lower(rest))
     } else when cmd == "/yolo" {
@@ -576,6 +592,252 @@ to run_command_line(l) {
     give nothing
 }
 
+# ---------- backup models (/fallback) ----------
+
+to set_fallbacks(ids) {
+    out = []
+    each id in ids {
+        when id != SETTINGS.model_id and not has(out, id) and len(out) < MAX_MODELS - 1 { out = push(out, id) }
+    }
+    set_setting("fallbacks", out)
+}
+
+# The chain of models, each with what it has done this session and whether
+# it is resting.
+to show_chain() {
+    chain = model_chain()
+    show ""
+    show bold("Models, in the order they are tried") + dim("  ({len(chain)} of {MAX_MODELS})")
+    each i in range(len(chain)) {
+        id = chain[i]
+        role = "backup"
+        when i == 0 { role = "main" }
+        state_note = ""
+        when not has_key(provider_of(id)) {
+            state_note = red("no {provider_name(provider_of(id))} key")
+        } else when rest_left(id) > 0 {
+            state_note = yellow("resting {how_long(rest_left(id))}: {health_of(id).reason}")
+        } else when id == current_model() and (ACTIVE_MODEL != nothing or i == 0) {
+            state_note = green("● in use")
+        } else {
+            state_note = dim("ready")
+        }
+        used = ""
+        when has(USAGE.by_model, id) {
+            m = USAGE.by_model[id]
+            parts = []
+            when m.calls > 0 { parts = push(parts, "{m.calls} answered · {short_tokens(m.input + m.output)} tokens") }
+            when m.failures > 0 { parts = push(parts, "{m.failures} failed") }
+            used = dim("  " + join(parts, " · "))
+        }
+        show "  " + brand(pad(i + 1, 2)) + "  " + pad(id, 46) + dim(pad(role, 8)) + state_note + used
+    }
+    show ""
+    when len(chain) == 1 {
+        show dim("  No backups yet. When a model is rate limited, busy, too slow or gives a broken reply,")
+        show dim("  the next one takes over by itself. /fallback auto picks some from your services.")
+    } else {
+        show dim("  A model that is rate limited, busy, too slow (over {SETTINGS.switch_after} s) or gives a broken reply")
+        show dim("  rests, and the next takes over; Tab while it waits moves on at once.")
+    }
+    show dim("  /fallback add <number or name> · remove <position> · auto · clear · reset · wait <seconds>")
+    show ""
+}
+
+# "3 7 12", "3, 7" or "gemini flash, laguna": the models asked for.
+to fallback_choices(t) {
+    when has(t, ",") { give filter(map(split(t, ","), x => trim(x)), x => x != "") }
+    words = filter(split(t), w => w != "")
+    when len(words) > 1 and len(filter(words, w => number_or_nothing(w) == nothing)) == 0 { give words }
+    give [trim(t)]
+}
+
+to fallback_add(t) {
+    when trim(t) == "" {
+        list_models("", no)
+        t = input(brand("  Backup models: numbers or names, separated by spaces or commas › "))
+        when t == nothing or trim(t) == "" { give nothing }
+    }
+    each c in fallback_choices(t) {
+        when len(model_chain()) >= MAX_MODELS {
+            show yellow("  There are already {MAX_MODELS} models; /fallback remove makes room.")
+            give nothing
+        }
+        id = nothing
+        try { id = pick_model(c) } else problem { show red("  " + explain_problem(problem)) }
+        when id != nothing {
+            when has(model_chain(), id) {
+                show dim("  {id} is already in the chain.")
+            } else {
+                show dim("  Checking that {id} answers…")
+                check_result = test_model(id)
+                erase_line()
+                keep = yes
+                when not check_result.ok {
+                    show red("  ✗ {id} isn't answering: " + check_result.problem)
+                    answer = input(brand("  Add it anyway? (y/n) "))
+                    keep = answer != nothing and has(["y", "yes"], lower(trim(answer)))
+                } else when not check_result.tools {
+                    show yellow("  ~ {id} answered in {fixed(check_result.seconds, 1)} s but didn't use a tool when asked.")
+                }
+                when keep {
+                    set_fallbacks(push(SETTINGS.fallbacks, id))
+                    forgive(id)
+                    show green("  ✓ Added {id}") + dim(" as backup {len(model_chain()) - 1}, on {provider_name(provider_of(id))}")
+                }
+            }
+        }
+    }
+}
+
+to fallback_remove(t) {
+    chain = model_chain()
+    n = number_or_nothing(t)
+    id = nothing
+    when n != nothing and n == floor(n) and n >= 1 and n <= len(chain) {
+        id = chain[n - 1]
+    } else {
+        matches = filter(chain, c => name_matches(c, t))
+        when len(matches) == 1 { id = matches[0] }
+    }
+    when id == nothing {
+        show yellow("  Say which, by its number in /fallback (2 for the first backup) or its name.")
+        give nothing
+    }
+    when id == SETTINGS.model_id {
+        when len(chain) == 1 {
+            show yellow("  That's the only model. /model picks another.")
+            give nothing
+        }
+        # the first backup becomes the main model
+        set_setting("model_id", chain[1])
+        set_fallbacks(slice(chain, 2))
+        change ACTIVE_MODEL = nothing
+        show green("  Took out {id}; {chain[1]} is now the main model.")
+        give nothing
+    }
+    set_fallbacks(filter(SETTINGS.fallbacks, f => f != id))
+    show green("  Took out {id}.")
+}
+
+# Good backups from every service you have a key for, from other services
+# first (a rate limit is per service), checked before they are added.
+to fallback_auto() {
+    ids = []
+    try { ids = nv_models(no) } else problem {
+        show red("  Couldn't get the list of models: " + explain_problem(problem))
+        give nothing
+    }
+    primary = SETTINGS.model_id
+    order = filter(PROVIDER_ORDER, p => has_key(p) and p != provider_of(primary))
+    when has_key(provider_of(primary)) { order = push(order, provider_of(primary)) }
+    lists = map(order, p => filter(suggested_models(p, filter(ids, id => provider_of(id) == p)), id => id != primary))
+    candidates = []
+    each round_no in range(2) {
+        each l in lists {
+            when len(l) > round_no and not has(candidates, l[round_no]) { candidates = push(candidates, l[round_no]) }
+        }
+    }
+    candidates = filter(candidates, c => not has(model_chain(), c))
+    when len(candidates) == 0 {
+        show dim("  No other suggested models to add. /fallback add <name> adds any model; /setup connects another service.")
+        give nothing
+    }
+    added = 0
+    each id in candidates {
+        when len(model_chain()) < MAX_MODELS {
+            show dim("  Checking {id}…")
+            check_result = test_model(id)
+            erase_line()
+            when check_result.ok and check_result.tools {
+                set_fallbacks(push(SETTINGS.fallbacks, id))
+                forgive(id)
+                added += 1
+                show green("  ✓ {id}") + dim("  {provider_name(provider_of(id))}, answered in {fixed(check_result.seconds, 1)} s")
+            } else when check_result.ok {
+                show dim("  ✗ {id}: didn't use a tool when asked; left out")
+            } else {
+                show dim("  ✗ {id}: " + one_line(check_result.problem, 100))
+            }
+        }
+    }
+    when added == 0 { show yellow("  None of the suggested models answered well just now; try again later, or /fallback add <name>.") }
+    show_chain()
+}
+
+to command_fallback(rest) {
+    words = split(trim(rest))
+    sub = ""
+    more = ""
+    when len(words) > 0 {
+        sub = lower(words[0])
+        more = trim(slice(trim(rest), len(words[0])))
+    }
+    when sub == "" or sub == "list" {
+        show_chain()
+    } else when sub == "add" {
+        fallback_add(more)
+    } else when sub == "remove" or sub == "rm" or sub == "drop" {
+        fallback_remove(more)
+    } else when sub == "clear" {
+        set_fallbacks([])
+        change ACTIVE_MODEL = nothing
+        show green("  No backups now: only {SETTINGS.model_id} is used.")
+    } else when sub == "auto" {
+        fallback_auto()
+    } else when sub == "reset" {
+        change MODEL_HEALTH = {}
+        change ACTIVE_MODEL = nothing
+        show green("  Every model will be tried again, from the first.")
+    } else when sub == "wait" {
+        n = number_or_nothing(more)
+        when n == nothing or n < 10 {
+            show "  A model gets {SETTINGS.switch_after} s to answer before a backup takes over. /fallback wait 180 changes it."
+        } else {
+            set_setting("switch_after", floor(n))
+            show green("  A model now gets {floor(n)} s to answer before a backup takes over.")
+        }
+    } else {
+        # "/fallback gemini flash" adds it
+        fallback_add(rest)
+    }
+}
+
+# ---------- tokens used (/usage) ----------
+
+to command_usage() {
+    u = USAGE
+    minutes = round((clock() - SESSION_STARTED) / 60)
+    show ""
+    show bold("Tokens used this session") + dim("  ({minutes} min, {u.calls} requests)")
+    show "  " + dim(pad("Total", 10)) + bold(grouped(u.input + u.output)) + dim("  ({grouped(u.input)} in · {grouped(u.output)} out)")
+    when u.calls > 0 { show "  " + dim(pad("Average", 10)) + "{grouped((u.input + u.output) / u.calls)} a request" }
+    show "  " + dim(pad("Context", 10)) + "about {grouped(conversation_tokens())} tokens in the conversation now"
+    when len(keys(u.by_model)) > 0 {
+        show ""
+        show "  " + dim(pad("Model", 46) + pad("Requests", 10) + pad("In", 12) + pad("Out", 10) + "Failed")
+        order = model_chain()
+        each k in keys(u.by_model) {
+            when not has(order, k) { order = push(order, k) }
+        }
+        each id in order {
+            when has(u.by_model, id) {
+                m = u.by_model[id]
+                mark = " "
+                when m.estimated > 0 { mark = "~" }
+                show "  " + pad(id, 46) + pad(text(m.calls), 10) + pad(grouped(m.input), 12) + pad(grouped(m.output), 10) + text(m.failures) + dim(mark)
+            }
+        }
+    }
+    when u.failures > 0 {
+        note = "\n  {u.failures} request(s) to a model failed"
+        when u.switches > 0 { note += "; a backup took over {u.switches} time(s)" }
+        show dim(note + ".")
+    }
+    when u.estimated > 0 { show dim("  ~ {u.estimated} request(s) estimated: the service didn't say how many tokens it used.") }
+    show ""
+}
+
 # ---------- the welcome box at the start ----------
 
 to banner() {
@@ -583,6 +845,7 @@ to banner() {
         [["✻", "brand"], [" ", ""], [APP_NAME, "bold"], ["  {APP_VERSION} · a coding agent on NVIDIA, Gemini and OpenRouter models, written in Antares", "dim"]],
         [],
         [[pad("model", 8), "dim"], [SETTINGS.model_id, ""], ["  " + provider_name(provider()), "dim"]],
+        backups_row(),
         [[pad("folder", 8), "dim"], [WORKDIR, ""]],
         [[pad("mode", 8), "dim"], [SETTINGS.mode, ""], [mode_note(), "dim"]],
     ]
@@ -596,6 +859,14 @@ to banner() {
     draw_box(rows)
     show dim("  /help for commands · /model to switch models · /undo to take back changes · Esc stops it · Ctrl+C quits")
     show ""
+}
+
+to backups_row() {
+    chain = model_chain()
+    when len(chain) == 1 { give [[pad("backups", 8), "dim"], ["none", ""], ["  (/fallback auto adds some, so a busy model doesn't stop the work)", "dim"]] }
+    more = ""
+    when len(chain) > 2 { more = ", +{len(chain) - 2} more" }
+    give [[pad("backups", 8), "dim"], [chain[1] + more, ""], ["  (/fallback)", "dim"]]
 }
 
 to mode_note() {

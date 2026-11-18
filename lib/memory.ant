@@ -168,7 +168,6 @@ to remember_session() {
         give nothing
     }
     change SPIN_LABEL = "Thinking"
-    add_usage(r)
     reply = arg(r.choices[0].message, "content", "")
     when kind(reply) != "text" { give nothing }
     summary = ""

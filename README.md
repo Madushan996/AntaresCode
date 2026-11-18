@@ -16,7 +16,9 @@ runs your tests, servers and commands, searches the web, fixes what fails, and
 tells you what it did. By default it works on its own from start to finish
 without asking; `/plan` makes it plan first and wait for your approval, and
 `/undo` takes back what it changed. You can switch between NVIDIA's, Gemini's and
-OpenRouter's free models at any time.
+OpenRouter's free models at any time, and give it up to four backup models:
+when one is rate limited, busy, too slow or gives a broken reply, the next
+takes over by itself and the work carries on.
 
 ```
 › The tests in test_stats.py fail. Find out why and fix it.
@@ -111,7 +113,8 @@ is optional):
    models are offered by two services (NVIDIA's
    `nvidia/nemotron-3-ultra-550b-a55b` is OpenRouter's
    `nvidia/nemotron-3-ultra-550b-a55b:free`); a model runs on the service it
-   is listed under.
+   is listed under. Then it offers the other suggestions as **backup
+   models** (Enter takes them; see [Backup models](#backup-models)).
 3. **How it should work**: on its own (the default), asking before commands,
    or asking before every change.
 4. **Memory**: whether to remember things about you and your projects
@@ -140,7 +143,7 @@ name, still works.
 | Option | Meaning |
 |---|---|
 | `folder` | The project to work in (default: the current folder) |
-| `-m model` | Use this model (and remember it) |
+| `-m model` | Use this model (and remember it); `-m main,backup1,backup2` also sets its backups |
 | `-p "task"` | Do one task, print what happened, and exit (for scripts) |
 | `--yolo` | Never ask before edits and commands (this run only; already the default) |
 | `--no-color` | Plain text (this run only) |
@@ -150,7 +153,12 @@ name, still works.
 Type what you want and press Enter. While the model thinks, a star twinkles
 beside the words: it grows from a dot to a full star and glows from deep red
 through orange to gold, like Antares itself (only the star moves). After each request it
-shows how long it took, the tokens it used, and how many files it changed.
+shows how long it took, the tokens it used, which backup answered (if one
+did), how many files it changed, and the tokens used so far this session:
+
+```
+  ✻ 9.4 s · 6,120 tokens in, 180 out · 1 file(s) changed (/diff, /undo) · session 48.3k (/usage)
+```
 
 | Type | What it does |
 |---|---|
@@ -186,6 +194,12 @@ steps in a row, with no change that worked in between, it stops and says so.
 | `/model <number or name>` | Switches model; part of a name is enough, with the words in any order (`/model laguna`, `/model mistral 4 large`). It checks first that the model answers and can use tools |
 | `/models [word]` | Lists the chat models again (fresh), optionally only those containing a word (`/models gemini`) |
 | `/test [model]` | Checks that a model answers and can use tools |
+| `/fallback` | The models it uses, in order (up to 5: the model and 4 backups), and whether each is ready or resting |
+| `/fallback add <numbers or names>` | Adds backups, checking each first (`/fallback add 3 7`, `/fallback add gemini flash, laguna`) |
+| `/fallback auto` | Picks good backups from every service you have a key for, other services first, and checks them |
+| `/fallback remove <position or name>` | Takes one out (`remove 1` makes the first backup the main model) |
+| `/fallback clear` / `reset` / `wait <s>` | No backups / try every model again now / how long a model gets before a backup takes over (default 120 s) |
+| `/usage` | Tokens used this session: in all, on average, and for each model, with failed requests (also `/tokens`) |
 | `/mode yolo` / `edits` / `ask` | Never ask and work on its own (the default) / edit freely but ask for commands / ask before edits and commands |
 | `/clear` | Starts a new conversation |
 | `/compact [note]` | Summarises the conversation to make room |
@@ -199,7 +213,7 @@ steps in a row, with no change that worked in between, it stops and says so.
 | `/processes` (`/ps`) | Programs running in the background; `/stop <number>` stops one |
 | `/export [file]` | Saves the conversation as a Markdown file |
 | `/todos` | Shows the model's task list |
-| `/status` | Model, folder, mode, conversation size and tokens used |
+| `/status` | Models and backups, folder, mode, conversation size and tokens used |
 | `/thinking` | Shows or hides the model's reasoning |
 | `/max <tokens>` | The longest reply allowed |
 | `/cd <folder>` | Works in another folder (new conversation) |
@@ -304,14 +318,68 @@ NVIDIA's:
 | `nvidia/nemotron-3.5-lightning-30b-a3b` | Small and quick |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | Small, with reasoning |
 
-Free models come and go and are sometimes busy, and both services limit how
-many requests a free key can make each minute; if one service is busy,
-`/model` switches to the other. Switching with
+Free models come and go and are sometimes busy, and every service limits how
+many requests a free key can make each minute (and OpenRouter, each day).
+Backup models (below) deal with that by themselves. Switching with
 `/model` checks the model first and warns you if it isn't answering; `/test`
-checks again later. Antares Code tries again by itself when the service says
-it is busy. Models that build.nvidia.com shows as playground-only ("API access
+checks again later. Models that build.nvidia.com shows as playground-only ("API access
 not available yet") aren't offered to API keys, so they appear only once
 NVIDIA opens them.
+
+## Backup models
+
+Up to five models can share the work: the model chosen with `/model`, and up
+to four backups. Each request goes to the first of them that is ready. When
+one fails, the request moves straight on to the next, and the model that
+failed rests for a while:
+
+```
+  ↪ nvidia/nemotron-3-ultra-550b-a55b: rate limited · switching to gemini-3.8-flash
+```
+
+| What went wrong | How it is told | How long the model rests |
+|---|---|---|
+| Rate limited | error 429, "rate limit", `RESOURCE_EXHAUSTED` | as long as the service asks (its `Retry-After` header, Gemini's `retryDelay`, OpenRouter's reset time), otherwise 10 s, doubling each time in a row |
+| Daily limit | OpenRouter's `free-models-per-day`, Gemini's per-day quota | until the limit resets (an hour if the service doesn't say) |
+| Busy | errors 500–503 | 5 s, doubling each time in a row |
+| Too slow | no answer within 120 s while a backup is ready (`/fallback wait` changes it), or errors 408 / 504 | 60 s, doubling |
+| Broken reply | not JSON, an error inside a "200 OK", no answer, or an empty one | 5 s, doubling |
+| Key or credit | errors 401, 402, 403 | the rest of the session |
+| Model gone | error 404 | the rest of the session |
+| Request refused | errors 400, 413, 422 (too long for that model, tools not supported) | 5 minutes |
+
+A model that has rested is tried first again (`↩ … has rested; back to
+it`), so the main model takes over again as soon as it can. If every model
+is resting, it waits for the first to be free (up to 90 s; Esc stops it); if
+none will be free by then, it says what happened to each. Pressing **Tab**
+while it waits moves on to the next model at once. With only one model it
+works as before: it waits and tries that model again when the service is
+busy.
+
+Backups on other services work best, since rate limits are per service and
+per key: `/fallback auto` picks them that way. `/fallback` shows each model
+with what it has done this session and whether it is resting; `/fallback
+reset` lets them all be tried again at once.
+
+## Tokens used
+
+Every request's tokens are counted, for the model that answered, from what
+the service reports (a service that doesn't say is estimated, at about 4
+characters a token, and marked `~`). The line after each request shows the
+session's total, and `/usage` shows the whole session:
+
+```
+Tokens used this session  (35 min, 42 requests)
+  Total     152,340  (148,200 in · 4,140 out)
+  Average   3,627 a request
+  Context   about 23,400 tokens in the conversation now
+
+  Model                                         Requests  In          Out       Failed
+  nvidia/nemotron-3-ultra-550b-a55b             30        120,000     3,000     2
+  gemini-3.8-flash                              12        28,200      1,140     0
+```
+
+Leaving shows the total too (`Bye. This session used 152,340 tokens …`).
 
 ## Your settings folder, and sharing Antares Code
 
@@ -321,7 +389,7 @@ Everything that is yours is kept in `.antares-code` in your user folder
 | In `.antares-code` | What it is |
 |---|---|
 | `keys.json` | Your API keys (NVIDIA, Gemini, OpenRouter) |
-| `settings.json` | Your model, mode and other settings |
+| `settings.json` | Your model, its backups, mode and other settings |
 | `sessions/` | Conversations, one per project folder, for `/resume` |
 | `memory/` | What it remembers about you and your projects |
 
@@ -397,7 +465,7 @@ flowchart LR
     subgraph app["Antares Code: antares_code.ant, or acode.exe with Antares inside"]
         start["<b>Start-up and commands</b><br/>antares_code.ant · commands.ant<br/>setup.ant (welcome screen, /reset)<br/>update.ant (/update)"]
         agent["<b>Agent loop</b><br/>agent.ant<br/>system prompt, plan mode,<br/>helper agents, summarising"]
-        api["<b>Model requests</b><br/>api.ant<br/>keys, model lists, retries"]
+        api["<b>Model requests</b><br/>api.ant<br/>keys, model lists,<br/>backup models, token counts"]
         tools["<b>Tools</b><br/>tools.ant · web.ant<br/>processes.ant · history.ant"]
         mem["<b>Memory</b><br/>memory.ant"]
         ui["<b>Screen</b><br/>ui.ant<br/>boxes, diffs, the star"]
@@ -465,7 +533,7 @@ The files:
 | `acode.bat` | Starts it on Windows (`nvcode.bat` too, under its old name) |
 | `lib/state.ant` | Settings and everything remembered while it runs |
 | `lib/ui.ant` | Colours, the ● / ⎿ layout, the twinkling star, boxes, diffs and light Markdown |
-| `lib/api.ant` | The three services (NVIDIA, Gemini and OpenRouter, all OpenAI-style): keys, model lists, chat requests with retries, run in the background so the star can move |
+| `lib/api.ant` | The three services (NVIDIA, Gemini and OpenRouter, all OpenAI-style): keys, model lists, the chain of backup models (telling failures apart, resting and switching), token counts, and chat requests run in the background so the star can move |
 | `lib/setup.ant` | The welcome screen (`/setup`, `/reset`), and moving settings to your settings folder |
 | `lib/update.ant` | Checking for new versions on GitHub, and installing them (`/update`) |
 | `lib/tools.ant` | The file, search and command tools, and asking before edits and commands |

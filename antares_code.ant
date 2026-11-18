@@ -2,7 +2,7 @@
 # Google's Gemini models.
 # Written entirely in Antares.
 #
-#   antares antares_code.ant [folder] [-m model] [-p "prompt"] [--yolo] [--no-color]
+#   antares antares_code.ant [folder] [-m model[,backup,...]] [-p "prompt"] [--yolo] [--no-color]
 #
 # or, on Windows, acode.bat with the same options. Run it in (or point it
 # at) the project to work on; /help lists the commands.
@@ -95,7 +95,12 @@ to main() {
         a = given[i]
         when (a == "-m" or a == "--model") and i + 1 < len(given) {
             i += 1
-            set_setting("model_id", given[i])
+            # "-m main,backup1,backup2": the first is the model, the rest its backups
+            picked = filter(map(split(given[i], ","), x => trim(x)), x => x != "")
+            when len(picked) > 0 {
+                set_setting("model_id", picked[0])
+                when len(picked) > 1 { set_fallbacks(slice(picked, 1)) }
+            }
         } else when (a == "-p" or a == "--print") and i + 1 < len(given) {
             i += 1
             prompt = given[i]
@@ -104,7 +109,7 @@ to main() {
         } else when a == "--no-color" {
             set_for_this_run("color", no)
         } else when a == "-h" or a == "--help" {
-            show "{APP_NAME}: antares antares_code.ant [folder] [-m model] [-p \"prompt\"] [--yolo] [--no-color]"
+            show "{APP_NAME}: antares antares_code.ant [folder] [-m model[,backup,...]] [-p \"prompt\"] [--yolo] [--no-color]"
             give nothing
         } else {
             folder = a
@@ -183,7 +188,11 @@ to main() {
     }
     remember_session()
     stop_all_processes()
-    show dim("  Bye.")
+    when USAGE.calls > 0 {
+        show dim("  Bye. This session used {grouped(USAGE.input + USAGE.output)} tokens ({grouped(USAGE.input)} in, {grouped(USAGE.output)} out) in {USAGE.calls} requests.")
+    } else {
+        show dim("  Bye.")
+    }
 }
 
 main()

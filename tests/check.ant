@@ -298,6 +298,104 @@ check(suggested_models("gemini", ["gemini-2.5-pro", "gemini-3.1-pro-preview", "g
 check(recommended("nvidia/nemotron-3-ultra-550b-a55b:free") and not recommended("liquid/lfm-3-1.7b:free"), "recommended OpenRouter models")
 check(squeeze("abcdefghij", 4) == "ab\n... [6 characters cut] ...\nij", "squeeze")
 
+# ---------- backup models, and failures told apart ----------
+check(status_of("error 429 from OpenRouter: x") == 429 and status_of("https://x answered with error 503: busy") == 503 and status_of("no error here") == 0, "status_of")
+check(retry_hint("error 429 from NVIDIA (retry-after 12 s): x") == 12, "retry_hint: Retry-After")
+check(retry_hint("\{\"retryDelay\": \"37s\"}") == 37, "retry_hint: Gemini's retryDelay")
+reset_ms = floor((clock() + 50) * 1000)
+hint = retry_hint("\{\"X-RateLimit-Reset\":\"{reset_ms}\"}")
+check(hint != nothing and hint > 45 and hint <= 51, "retry_hint: OpenRouter's reset time: {hint}")
+check(retry_hint("nothing to see") == nothing, "retry_hint: none")
+check(failure_of("error 429 from NVIDIA: too many", 0).kind == "limit" and failure_of("error 429 from NVIDIA: too many", 0).rest == 10, "429 is a rate limit")
+check(failure_of("error 429 from NVIDIA: too many", 2).rest == 40, "rests grow with each failure")
+check(failure_of("error 429 from NVIDIA (retry-after 33 s): x", 0).rest == 33, "the service's wait is used")
+check(failure_of("error 429 from OpenRouter: Rate limit exceeded: free-models-per-day", 0).rest == 3600, "a daily limit rests for long")
+check(failure_of("the request timed out after 120 s", 0).kind == "timeout", "timeouts")
+check(failure_of("error 503 from Gemini: overloaded", 0).kind == "busy", "busy")
+check(failure_of("error 401 from NVIDIA: no", 0).final and failure_of("error 404 from NVIDIA: gone", 0).final, "bad keys and missing models are final")
+check(failure_of("error 400 from Gemini: context length exceeded", 0).reason == "the conversation is too long for it", "too long")
+check(failure_of("bad reply from NVIDIA: it was empty", 0).reason == "an empty reply", "empty replies")
+check(failure_of(STOPPED, 0).kind == "stopped", "Esc")
+good = to_json({choices: [{message: {role: "assistant", content: "hi"}, finish_reason: "stop"}], usage: {prompt_tokens: 100, completion_tokens: 20}})
+check(reply_fault(json(good)) == nothing, "a good reply")
+check(reply_fault({choices: [{message: {role: "assistant", content: ""}, finish_reason: "stop"}]}) == "it was empty", "an empty reply")
+check(reply_fault({choices: [{message: {role: "assistant", content: "", tool_calls: [{id: "1", function: {name: "x", arguments: "\{}"}}]}}]}) == nothing, "tool calls alone are fine")
+check(has(reply_fault({error: {code: 429, message: "slow down"}}), "error 429"), "an error inside a 200 reply")
+check(reply_fault({choices: []}) == "it held no answer", "no choices")
+check(grouped(152340) == "152,340" and grouped(999) == "999" and grouped(1000000) == "1,000,000", "grouped")
+check(short_tokens(980) == "980" and short_tokens(45230) == "45.2k" and short_tokens(1250000) == "1.25M", "short_tokens")
+
+KEYS = {nvidia: "nvapi-test", gemini: "AIza-test", openrouter: "sk-or-test", tavily: nothing}
+s = SETTINGS
+s.model_id = "nvidia/main-model"
+s.fallbacks = ["gemini-3.8-flash", "nvidia/main-model", "x/y:free", "a/b", "c/d", "e/f"]
+SETTINGS = s
+check(model_chain() == ["nvidia/main-model", "gemini-3.8-flash", "x/y:free", "a/b", "c/d"], "the chain: no repeats, at most 5: {model_chain()}")
+s.fallbacks = ["gemini-3.8-flash", "x/y:free"]
+SETTINGS = s
+MODEL_HEALTH = {}
+USAGE = {input: 0, output: 0, calls: 0, estimated: 0, failures: 0, switches: 0, by_model: {}}
+
+# rate limited: the backup answers at once, and the main model rests
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 429 from NVIDIA: Too Many Requests"], "gemini-3.8-flash": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "gemini-3.8-flash" and ACTIVE_MODEL == "gemini-3.8-flash", "a rate limited model hands over to the next")
+check(rest_left("nvidia/main-model") > 5 and health_of("nvidia/main-model").reason == "rate limited", "the rate limited model rests")
+check(USAGE.calls == 1 and USAGE.input == 100 and USAGE.output == 20 and USAGE.failures == 1 and USAGE.switches == 1, "usage counts the answer and the failure: {USAGE}")
+check(USAGE.by_model["gemini-3.8-flash"].calls == 1 and USAGE.by_model["nvidia/main-model"].failures == 1, "usage by model")
+
+# while it rests, requests go straight to the backup
+TEST_REPLIES = {"gemini-3.8-flash": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "gemini-3.8-flash", "a resting model is passed over")
+
+# once rested, the main model is first again
+forgive("nvidia/main-model")
+TEST_REPLIES = {"nvidia/main-model": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "nvidia/main-model" and ACTIVE_MODEL == "nvidia/main-model", "back to the main model after its rest")
+
+# broken and empty replies, and timeouts, hand over too
+TEST_REPLIES = {"nvidia/main-model": ["the service is down"], "gemini-3.8-flash": [to_json({choices: [{message: {role: "assistant", content: ""}, finish_reason: "stop"}]})], "x/y:free": ["FAIL the request timed out after 120 s"]}
+MODEL_HEALTH = {}
+failed_all = ""
+# (no waiting for a model to rest, in the tests)
+MAX_PAUSE = 0
+try { nv_chat([{role: "user", content: "hi"}], no) } else problem { failed_all = problem }
+MAX_PAUSE = 90
+check(explain_problem(failed_all) == failed_all and has(failed_all, "Every model failed") and has(failed_all, "a broken reply") and has(failed_all, "an empty reply") and has(failed_all, "too slow"), "when every model fails, each is named: {failed_all}")
+
+# a reply without token counts is estimated
+MODEL_HEALTH = {}
+before_est = USAGE.estimated
+TEST_REPLIES = {"nvidia/main-model": [to_json({choices: [{message: {role: "assistant", content: "hello there"}, finish_reason: "stop"}]})]}
+nv_chat([{role: "user", content: "hi"}], no)
+check(USAGE.estimated == before_est + 1 and USAGE.by_model["nvidia/main-model"].estimated == 1, "missing token counts are estimated")
+
+# a model without a key is left out of the chain
+KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: "sk-or-test", tavily: nothing}
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 503 from NVIDIA: overloaded"], "x/y:free": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "x/y:free", "a backup with no key is skipped")
+
+# one model alone: a final problem fails at once, as it is
+s.fallbacks = []
+SETTINGS = s
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 401 from NVIDIA: Unauthorized"]}
+alone = ""
+try { nv_chat([{role: "user", content: "hi"}], no) } else problem { alone = problem }
+check(has(alone, "error 401"), "one model: a bad key fails at once: {alone}")
+# and a busy one is waited for and tried again
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 429 from NVIDIA (retry-after 1 s): busy", good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "nvidia/main-model", "one model: tried again after its wait")
+TEST_REPLIES = nothing
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+
 when WINDOWS { shell("rmdir /s /q \"" + native(base) + "\"") } else { shell("rm -rf \"" + base + "\"") }
 when WINDOWS { shell("rmdir /s /q \"" + native(DATA_DIR) + "\"") } else { shell("rm -rf \"" + DATA_DIR + "\"") }
 show "Antares Code tools: all checks passed"

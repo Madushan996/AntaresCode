@@ -131,6 +131,24 @@ to rel(p) {
     give p
 }
 
+# 152340 as "152,340".
+to grouped(n) {
+    s = text(floor(n))
+    out = ""
+    while len(s) > 3 {
+        out = "," + slice(s, len(s) - 3) + out
+        s = slice(s, 0, len(s) - 3)
+    }
+    give s + out
+}
+
+# A count of tokens in short: 980, 45.2k, 1.25M.
+to short_tokens(n) {
+    when n < 1000 { give text(floor(n)) }
+    when n < 1000000 { give fixed(n / 1000, 1) + "k" }
+    give fixed(n / 1000000, 2) + "M"
+}
+
 # A number typed by the user, or nothing if it isn't one.
 to number_or_nothing(t) {
     try { give number(trim(t)) } else problem { give nothing }
@@ -159,8 +177,10 @@ to star_frame(i) = paint(STAR_FRAMES[i % len(STAR_FRAMES)], STAR_COLOURS[i % len
 
 to star_column() = len(indent()) + 3
 
-to spinner_start() {
-    show "{ESC}[?25l" + indent() + "  " + star_frame(0) + " " + paint(SPIN_LABEL + "…", "38;5;209") + dim("  " + SETTINGS.model_id + " · Esc to stop")
+to spinner_start(can_skip) {
+    keys_note = " · Esc to stop"
+    when can_skip { keys_note += " · Tab: next model" }
+    show "{ESC}[?25l" + indent() + "  " + star_frame(0) + " " + paint(SPIN_LABEL + "…", "38;5;209") + dim("  " + failing_model() + keys_note)
 }
 
 to spinner_turn(i) {
@@ -172,15 +192,16 @@ to spinner_stop() {
     show "{ESC}[?25h{ESC}[1A{ESC}[2K{ESC}[1A"
 }
 
-# Whether Esc was pressed since the last look. Other keys pressed while the
-# agent works are dropped. (Only in a Windows console: key() reads it
-# without waiting.)
+# Whether Esc was pressed since the last look. Tab asks to move on to the
+# next model (SKIP_ASKED); other keys pressed while the agent works are
+# dropped. (Only in a Windows console: key() reads it without waiting.)
 to esc_pressed() {
     when not WINDOWS or PRINT_MODE { give no }
     hit = no
     k = key()
     while k != nothing {
         when k == "escape" { hit = yes }
+        when k == "tab" { change SKIP_ASKED = yes }
         k = key()
     }
     give hit
@@ -197,7 +218,7 @@ to wait_or_stop(seconds) {
 }
 
 # The same, standing still (no colours, or output going to a file).
-to waiting_text() = indent() + dim("  ✻ {SPIN_LABEL}… ({SETTINGS.model_id})")
+to waiting_text() = indent() + dim("  ✻ {SPIN_LABEL}… ({failing_model()})")
 
 # ---------- boxes ----------
 
