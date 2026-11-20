@@ -550,16 +550,26 @@ to agent_turn(user_text) {
         # A reply cut off at the length limit: a tool call in it may be
         # missing its end, so drop such calls and ask for smaller pieces.
         was_cut = arg(choice, "finish_reason", "") == "length"
+        # a local model is cut off when its context is full, not at max_tokens
+        cut_local = provider_of(text(arg(r, "served_by", ""))) == "ollama"
         when was_cut {
             cut_offs += 1
             calls = filter(calls, c => inputs_of(c) != nothing)
             when cut_offs > 3 {
-                show yellow("  The model's replies keep getting cut off at {SETTINGS.max_tokens} tokens. /max raises the limit; or ask for smaller steps.")
+                when cut_local {
+                    show yellow("  The local model keeps running out of room in its {grouped(local_context())}-token context. /local context 65536 gives it more (if this computer has the memory), /compact makes the conversation shorter, or ask for smaller steps.")
+                } else {
+                    show yellow("  The model's replies keep getting cut off at {SETTINGS.max_tokens} tokens. /max raises the limit; or ask for smaller steps.")
+                }
                 change MESSAGES = push(MESSAGES, reply)
                 save_session()
                 give no
             }
-            show yellow("  (The reply was too long and got cut off; asking the model to carry on in smaller pieces.)")
+            when cut_local {
+                show yellow("  (The local model's {grouped(local_context())}-token context filled up and the reply got cut off; asking it to carry on in smaller pieces.)")
+            } else {
+                show yellow("  (The reply was too long and got cut off; asking the model to carry on in smaller pieces.)")
+            }
         }
         when len(calls) > 0 { reply.tool_calls = calls }
         change MESSAGES = push(MESSAGES, reply)
@@ -629,7 +639,9 @@ to agent_turn(user_text) {
             give no
         }
         when was_cut {
-            change MESSAGES = push(MESSAGES, {role: "user", content: "Your last reply was cut off because it reached the length limit ({SETTINGS.max_tokens} tokens), so anything unfinished in it was lost (finished tool calls were run). Carry on from where you were. Write long files in parts: create the file with write_file holding the first part (up to about 250 lines), then add the rest with append_file, one part at a time. Keep your thinking short."})
+            limit_words = "it reached the length limit ({SETTINGS.max_tokens} tokens)"
+            when cut_local { limit_words = "your context ({local_context()} tokens) was full" }
+            change MESSAGES = push(MESSAGES, {role: "user", content: "Your last reply was cut off because {limit_words}, so anything unfinished in it was lost (finished tool calls were run). Carry on from where you were. Write long files in parts: create the file with write_file holding the first part (up to about 250 lines), then add the rest with append_file, one part at a time. Keep your thinking short."})
         }
     }
 }

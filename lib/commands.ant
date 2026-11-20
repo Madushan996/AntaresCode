@@ -73,6 +73,7 @@ to show_help() {
         ["/fallback", "backup models (up to 5 in all), used by themselves when one is busy or rate limited"],
         ["/local [on|off]", "local-only mode: use only models on this computer, with Ollama; /local shows how it stands"],
         ["/local model|fallback", "choose the local model; turn the local last resort (when every online model fails) on or off"],
+        ["/local context [tokens]", "how much context Ollama is asked for on each request (default 32768; less uses less memory)"],
         ["/fallback add|rm|auto", "add backups (numbers or names), take one out, or pick good ones for you"],
         ["/usage", "tokens used this session, in all and by model"],
         ["/mode yolo|edits|ask", "never ask, work on its own (default) / edit freely, ask for commands / ask before edits and commands"],
@@ -945,6 +946,7 @@ to show_local() {
         when has_key("ollama") { auto = auto_local() }
         when auto != nothing { show "  " + dim(pad("Local model", 13)) + auto + dim("  picked by itself (/local model chooses one)") } else { show "  " + dim(pad("Local model", 13)) + dim("none that can use tools (ollama pull qwen3)") }
     }
+    show "  " + dim(pad("Context", 13)) + "{grouped(local_context())} tokens" + dim("  for the instructions, conversation and reply (/local context 16384 uses less memory)")
     when SETTINGS.local_fallback {
         show "  " + dim(pad("Last resort", 13)) + "on" + dim("  when every online model fails, the local model takes over (/local fallback off)")
     } else {
@@ -1057,6 +1059,17 @@ to command_local(rest) {
         when spare != nothing { show dim("  When every online model fails, {spare} on this computer takes over.") }
     } else when sub == "model" {
         local_choose(more)
+    } else when sub == "context" or sub == "ctx" {
+        n = number_or_nothing(more)
+        when n == nothing {
+            show "  Ollama is asked for a {grouped(local_context())}-token context on each request: room for the instructions (about 3,300 tokens), the conversation and the reply."
+            show dim("  /local context 16384 uses less memory; 65536 gives long conversations more room. The conversation is summarised at 60% of it.")
+        } else when n < 8192 or n != floor(n) {
+            show yellow("  At least 8192: Antares Code's instructions and tools alone take about 3,300 tokens, and the conversation and replies need room too.")
+        } else {
+            set_setting("local_context", floor(n))
+            show green("  Ollama is now asked for a {grouped(floor(n))}-token context.") + dim(" (A larger one needs more memory; the model reloads on the next request.)")
+        }
     } else when sub == "fallback" or sub == "backup" or sub == "last" {
         m = lower(more)
         when m == "on" or m == "yes" {
@@ -1069,7 +1082,7 @@ to command_local(rest) {
             show_local()
         }
     } else {
-        show yellow("  /local, /local on, /local off, /local model [name|auto], /local fallback on|off")
+        show yellow("  /local, /local on, /local off, /local model [name|auto], /local context [tokens], /local fallback on|off")
     }
 }
 

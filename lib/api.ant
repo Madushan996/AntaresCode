@@ -204,6 +204,11 @@ to post_chat(id, body, limit, can_skip) {
     # started now if it is installed but not running
     when p == "ollama" { ensure_ollama() }
     url = base_of(p) + "/chat/completions"
+    # Ollama: its own API, which takes the context length (see lib/ollama.ant)
+    when p == "ollama" {
+        url = ollama_root() + "/api/chat"
+        body = ollama_body(body)
+    }
     name = provider_name(p)
     when not SETTINGS.color or PRINT_MODE or not WINDOWS {
         show waiting_text()
@@ -214,6 +219,7 @@ to post_chat(id, body, limit, can_skip) {
             fail(problem)
         }
         erase_line()
+        when p == "ollama" { give ollama_reply(reply) }
         give reply
     }
     dir = request_folder()
@@ -286,6 +292,7 @@ to post_chat(id, body, limit, can_skip) {
         when hint != nothing { wait_note = " (retry-after {round(hint)} s)" }
         fail("error {n} from {name}{wait_note}: " + one_line(reply, 500))
     }
+    when p == "ollama" { give ollama_reply(reply) }
     give reply
 }
 
@@ -314,6 +321,7 @@ to explain_problem(problem) {
     backups = ""
     when len(model_chain()) == 1 { backups = " Backup models (/fallback auto) let it switch by itself next time." }
     when provider_of(id) == "ollama" {
+        when ollama_memory_problem(problem) { give "Ollama hasn't the memory to run {api_model(id)} with a {grouped(local_context())}-token context. /local context 16384 (or 8192) uses less, or pick a smaller model with /local model." }
         when has(problem, "error 404") or has(low, "not found") { give "{api_model(id)} isn't downloaded in Ollama. In a terminal: ollama pull {api_model(id)}  (or pick another with /model)" }
         when has(low, "couldn't reach") { give "Ollama isn't answering. Start the Ollama app (or run ollama serve), then try again." + backups }
         when has(low, "does not support tools") { give "{api_model(id)} can't use tools, which a coding agent needs. Pick another with /model, or ollama pull qwen3." }
@@ -473,6 +481,7 @@ to failure_of(problem, strikes) {
     when n == 404 { give {kind: "gone", reason: "not available", rest: 86400, final: yes} }
     # Groq's free tier: a request larger than a model's tokens-per-minute
     # limit, which waiting won't fix
+    when ollama_memory_problem(problem) { give {kind: "refused", reason: "not enough memory for it", rest: 300, final: yes} }
     when n == 413 and has(low, "tokens per minute") { give {kind: "refused", reason: "too large for its per-minute token limit", rest: 300, final: yes} }
     when n == 429 or has(low, "rate limit") or has(low, "resource_exhausted") or has(low, "too many requests") {
         daily = has(low, "per-day") or has(low, "per day") or has(low, "daily") or has(low, "perday")
@@ -862,8 +871,13 @@ to test_model(id) {
     when p == "ollama" { limit = 180 }
     t0 = clock()
     try {
-        when p == "ollama" { ensure_ollama() }
-        r = json(fetch(base_of(p) + "/chat/completions", {headers: auth_headers_for(p), body: body, timeout: limit}))
+        when p == "ollama" {
+            ensure_ollama()
+            r = json(ollama_reply(fetch(ollama_root() + "/api/chat", {headers: {Accept: "application/json"}, body: ollama_body(body), timeout: limit})))
+            when arg(r, "error", nothing) != nothing { fail("error from Ollama: " + one_line(to_json(r.error), 300)) }
+        } else {
+            r = json(fetch(base_of(p) + "/chat/completions", {headers: auth_headers_for(p), body: body, timeout: limit}))
+        }
         msg = r.choices[0].message
         tools_ok = has(msg, "tool_calls") and msg.tool_calls != nothing and len(msg.tool_calls) > 0
         give {ok: yes, tools: tools_ok, seconds: clock() - t0, problem: ""}

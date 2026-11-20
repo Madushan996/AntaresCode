@@ -34,6 +34,7 @@ SETTINGS = {
     local_only: no,         # use only models on this computer, with Ollama (/local on)
     local_fallback: yes,    # when every online model fails, a local Ollama model takes over (last resort)
     local_model: "",        # the local model to use ("ollama/..."); "" picks a good downloaded one by itself
+    local_context: 32768,   # tokens of context asked of Ollama on each request (/local context): the prompt, conversation and reply must fit
 }
 
 DEFAULT_SETTINGS = SETTINGS  # kept as they are here, for /reset

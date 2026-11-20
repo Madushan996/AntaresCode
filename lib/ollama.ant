@@ -11,7 +11,7 @@
 # so that the service a model belongs to can be told from its name.
 
 OLLAMA_PORT = 11434
-OLLAMA_CONTEXT = 32768      # the context length Ollama is started with, when Antares Code starts it
+OLLAMA_CONTEXT = 32768      # the context asked for when SETTINGS.local_context isn't a sensible number
 OLLAMA_START_WAIT = 30      # seconds to wait for Ollama to answer after starting it
 
 # Good local coding models that can use tools, the best first.
@@ -110,14 +110,14 @@ to start_ollama(exe) {
         script = native(dir + "/ollama.cmd")
         launcher = native(dir + "/ollama.js")
         set_context = ""
-        when own_context { set_context = "@set OLLAMA_CONTEXT_LENGTH={OLLAMA_CONTEXT}" + CR + "\n" }
+        when own_context { set_context = "@set OLLAMA_CONTEXT_LENGTH={local_context()}" + CR + "\n" }
         write(script, set_context + "@\"" + native(exe) + "\" serve > \"" + log + "\" 2>&1" + CR + "\n")
         write(launcher, "new ActiveXObject(\"WScript.Shell\").Run('\"" + replace(script, "\\", "\\\\") + "\"', 0, false);\n")
         r = shell("cscript //nologo \"" + launcher + "\"", {timeout: 30})
         when r.code != 0 { fail("couldn't start Ollama: " + one_line(r.output + " " + r.errors, 200)) }
     } else {
         prefix = ""
-        when own_context { prefix = "OLLAMA_CONTEXT_LENGTH={OLLAMA_CONTEXT} " }
+        when own_context { prefix = "OLLAMA_CONTEXT_LENGTH={local_context()} " }
         shell(prefix + "nohup \"" + exe + "\" serve > \"" + log + "\" 2>&1 &", {timeout: 30})
     }
     o = OLLAMA
@@ -227,10 +227,97 @@ to ollama_state() {
 # usually shorter than an online one's, so it is summarised sooner.
 to compact_limit() {
     when provider_of(current_model()) != "ollama" and not SETTINGS.local_only { give SETTINGS.compact_at }
-    room = OLLAMA_CONTEXT
-    given = env("OLLAMA_CONTEXT_LENGTH")
-    when given != nothing and number_or_nothing(trim(given)) != nothing { room = number_or_nothing(trim(given)) }
-    give min(SETTINGS.compact_at, floor(room * 0.6))
+    give min(SETTINGS.compact_at, floor(local_context() * 0.6))
+}
+
+# ---------- Ollama's own chat API ----------
+# Ollama's OpenAI-style API (/v1) runs a model with the context Ollama was
+# started with, often only 4,096 tokens. Antares Code's instructions and tool
+# descriptions alone take about 3,300, so a little conversation (a web
+# search's results, say) filled the rest, the start of the prompt was
+# dropped, and every reply ran out of room. Its own API
+# (/api/chat) lets each request ask for a longer context, so requests to
+# Ollama go there, turned into its format and the replies turned back.
+
+# The context asked of Ollama on each request, in tokens.
+to local_context() {
+    n = SETTINGS.local_context
+    when kind(n) != "number" or n < 2048 { give OLLAMA_CONTEXT }
+    give floor(n)
+}
+
+# An OpenAI-style chat request, as a request to Ollama's /api/chat.
+to ollama_body(body) {
+    names = {}       # tool call id → the tool's name, for the tool's result
+    msgs = []
+    each m in body.messages {
+        role = text(arg(m, "role", "user"))
+        content = arg(m, "content", "")
+        when kind(content) != "text" { content = to_json(content) }
+        out = {role: role, content: content}
+        calls = arg(m, "tool_calls", nothing)
+        when role == "assistant" and kind(calls) == "list" and len(calls) > 0 {
+            native_calls = []
+            each c in calls {
+                f = arg(c, "function", {})
+                name = text(arg(f, "name", ""))
+                a = arg(f, "arguments", {})
+                when kind(a) == "text" {
+                    try { a = json(a) } else problem { a = {} }
+                }
+                when kind(a) != "map" { a = {} }
+                when arg(c, "id", nothing) != nothing { names[text(c.id)] = name }
+                native_calls = push(native_calls, {function: {name: name, arguments: a}})
+            }
+            out.tool_calls = native_calls
+        }
+        when role == "tool" {
+            id = text(arg(m, "tool_call_id", ""))
+            when has(names, id) { out.tool_name = names[id] }
+        }
+        msgs = push(msgs, out)
+    }
+    options = {num_ctx: local_context()}
+    when arg(body, "max_tokens", nothing) != nothing { options.num_predict = body.max_tokens }
+    when arg(body, "temperature", nothing) != nothing { options.temperature = body.temperature }
+    n = {"model": arg(body, "model", ""), messages: msgs, stream: no, options: options}
+    when kind(arg(body, "tools", nothing)) == "list" { n.tools = body.tools }
+    give n
+}
+
+# A reply from Ollama's /api/chat, as an OpenAI-style reply (JSON text).
+to ollama_reply(raw) {
+    r = nothing
+    try { r = json(raw) } else problem { give raw }
+    when kind(r) != "map" { give raw }
+    when arg(r, "error", nothing) != nothing { give to_json({error: {message: text(r.error)}}) }
+    m = arg(r, "message", {})
+    when kind(m) != "map" { m = {} }
+    calls = []
+    stamp = floor(clock() * 1000) % 1000000
+    i = 0
+    each c in arg(m, "tool_calls", []) {
+        f = arg(c, "function", {})
+        a = arg(f, "arguments", {})
+        when kind(a) != "text" { a = to_json(a) }
+        calls = push(calls, {id: "call_{stamp}_{i}", type: "function", function: {name: text(arg(f, "name", "")), arguments: a}})
+        i += 1
+    }
+    msg = {role: "assistant", content: text(arg(m, "content", ""))}
+    when len(calls) > 0 { msg.tool_calls = calls }
+    thinking = arg(m, "thinking", "")
+    when kind(thinking) == "text" and trim(thinking) != "" { msg.reasoning_content = thinking }
+    finish = "stop"
+    when len(calls) > 0 { finish = "tool_calls" }
+    when text(arg(r, "done_reason", "")) == "length" { finish = "length" }
+    usage = {prompt_tokens: arg(r, "prompt_eval_count", 0), completion_tokens: arg(r, "eval_count", 0)}
+    give to_json({"model": text(arg(r, "model", "")), choices: [{index: 0, message: msg, finish_reason: finish}], usage: usage})
+}
+
+# Whether a problem is Ollama not having the memory for a model (at this context).
+to ollama_memory_problem(problem) {
+    low = lower(text(problem))
+    give has(low, "more system memory") or has(low, "out of memory") or has(low, "not enough memory") or has(low, "cudamalloc failed") or has(low, "unable to allocate")
 }
 
 # ---------- local only, and the last resort ----------

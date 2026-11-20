@@ -213,6 +213,7 @@ steps in a row, with no change that worked in between, it stops and says so.
 | `/local on` / `off` | Local-only mode: only models on this computer are used / online models again |
 | `/local model [number, name or auto]` | The local model, for local-only mode and the last resort (`auto` picks a good one by itself) |
 | `/local fallback on` / `off` | Whether a local model takes over when every online model fails (on by default) |
+| `/local context [tokens]` | How much context Ollama is asked for on each request (default 32,768) |
 | `/usage` | Tokens used this session: in all, on average, and for each model, with failed requests (also `/tokens`) |
 | `/mode yolo` / `edits` / `ask` | Never ask and work on its own (the default) / edit freely but ask for commands / ask before edits and commands |
 | `/clear` | Starts a new conversation |
@@ -381,17 +382,23 @@ free, with no rate limits, and working offline.
   set), and looks for `ollama.exe` where the installer puts it (and on the
   PATH).
 - **Starting it**: if Ollama is installed but not running, it is started,
-  hidden, the first time one of its models is needed, with a context of
-  32,768 tokens (unless `OLLAMA_CONTEXT_LENGTH` is set). Its log is
+  hidden, the first time one of its models is needed. Its log is
   `ollama.log` in your settings folder.
+- **Context**: Ollama's own default context is often only 4,096 tokens.
+  Antares Code's instructions and tool descriptions alone take about 3,300,
+  so a little conversation filled the rest and every reply ran out of room
+  ("the reply was too long and got cut off"). So each request asks
+  Ollama for a 32,768-token context, however Ollama was started.
+  `/local context 16384` uses less memory; `/local context 65536` gives long
+  conversations more room. If Ollama hasn't the memory for it, it says so.
 - **Which models**: only ones downloaded to this computer; Ollama's cloud
   models (`:cloud`) are left out. `/model` shows each one's size, and marks
   the ones that can't use tools, which a coding agent needs. Good ones to
   download are `qwen3`, `qwen3-coder`, `gpt-oss` and `devstral`
   (`ollama pull qwen3`); then `/models` lists them.
-- **Context**: a local model's context is shorter than an online one's, so
-  while one is in use the conversation is summarised sooner (at 60% of
-  Ollama's context).
+- **Summarising**: a local model's context is shorter than an online one's,
+  so while one is in use the conversation is summarised sooner (at 60% of
+  that context).
 - Local models are slower on their first request (while they load) and on
   computers without a strong graphics card. A local model also makes a good
   last backup: it is never rate limited.

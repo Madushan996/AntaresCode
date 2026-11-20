@@ -588,6 +588,37 @@ ACTIVE_MODEL = nothing
 KEYS = saved_keys
 SETTINGS = saved_settings
 
+# Ollama's own API: requests and replies turned into its format and back
+sent = {"model": "qwen3:8b", max_tokens: 4096, temperature: 0.2, tools: [{type: "function", function: {name: "read_file", parameters: {type: "object"}}}], messages: [{role: "system", content: "be brief"}, {role: "user", content: "read a.txt"}, {role: "assistant", content: nothing, tool_calls: [{id: "c1", type: "function", function: {name: "read_file", arguments: "\{\"path\": \"a.txt\"}"}}]}, {role: "tool", tool_call_id: "c1", content: "hello"}]}
+nb = ollama_body(sent)
+check(nb.options.num_ctx == local_context() and nb.options.num_predict == 4096 and nb.options.temperature == 0.2 and nb.stream == no, "each request asks Ollama for the context: {nb.options}")
+check(nb["model"] == "qwen3:8b" and len(nb.tools) == 1 and len(nb.messages) == 4, "model, tools and messages are kept")
+check(nb.messages[2].tool_calls[0].function.arguments.path == "a.txt" and nb.messages[2].content == "", "a tool call's arguments become an object")
+check(nb.messages[3].role == "tool" and nb.messages[3].tool_name == "read_file" and nb.messages[3].content == "hello", "a tool's result is named after its tool")
+check(ollama_body({"model": "m", messages: [{role: "assistant", content: "x", tool_calls: [{id: "z", function: {name: "f", arguments: "not json"}}]}]}).messages[0].tool_calls[0].function.arguments == {}, "broken arguments become empty, not a failure")
+back = json(ollama_reply(to_json({"model": "qwen3:8b", message: {role: "assistant", content: "", thinking: "let me look", tool_calls: [{function: {name: "read_file", arguments: {path: "a.txt"}}}]}, done: yes, done_reason: "stop", prompt_eval_count: 6100, eval_count: 42})))
+c = back.choices[0]
+check(c.finish_reason == "tool_calls" and c.message.tool_calls[0].function.name == "read_file" and json(c.message.tool_calls[0].function.arguments).path == "a.txt" and kind(c.message.tool_calls[0].id) == "text", "Ollama's tool calls come back in the OpenAI form")
+check(c.message.reasoning_content == "let me look" and back.usage.prompt_tokens == 6100 and back.usage.completion_tokens == 42, "thinking and token counts come back")
+check(reply_fault(back) == nothing, "a converted reply is a good reply")
+check(json(ollama_reply(to_json({message: {role: "assistant", content: "half"}, done_reason: "length"}))).choices[0].finish_reason == "length", "a full context still shows as cut off")
+check(has(reply_fault(json(ollama_reply("\{\"error\": \"model 'x' not found\"}"))), "not found"), "an error from Ollama is an error")
+check(ollama_reply("not json") == "not json", "a reply that isn't JSON is left for the caller to report")
+check(ollama_memory_problem("error 500 from Ollama: model requires more system memory (12.0 GiB) than is available (7.1 GiB)") and failure_of("error 500 from Ollama: model requires more system memory (12.0 GiB) than is available", 0).final, "not enough memory is final, not a busy model")
+saved_trying = TRYING
+TRYING = "ollama/qwen3:8b"
+check(has(explain_problem("error 500 from Ollama: model requires more system memory (12.0 GiB) than is available"), "/local context 16384"), "not enough memory says to ask for less context")
+TRYING = saved_trying
+saved_settings = SETTINGS
+s = SETTINGS
+s.local_context = 16384
+SETTINGS = s
+check(local_context() == 16384 and ollama_body(sent).options.num_ctx == 16384, "/local context changes what is asked for")
+s.local_context = "lots"
+SETTINGS = s
+check(local_context() == OLLAMA_CONTEXT, "a context that isn't a number falls back to the default")
+SETTINGS = saved_settings
+
 # a command stopped by its time limit says so
 slow = "sleep 5"
 when WINDOWS { slow = "ping -n 6 127.0.0.1" }
