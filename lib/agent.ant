@@ -483,7 +483,7 @@ to agent_turn(user_text) {
     # read-only calls since the last change that worked
     looks = []
     fails = 0
-    when conversation_tokens() > SETTINGS.compact_at { compact("") }
+    when conversation_tokens() > compact_limit() { compact("") }
     before = len(MESSAGES)
     change MESSAGES = push(MESSAGES, {role: "user", content: user_text})
     steps = 0

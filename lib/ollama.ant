@@ -1,0 +1,371 @@
+# Antares Code: models on your own computer, with Ollama (ollama.com).
+#
+# There is nothing to set up: when Antares Code starts, it looks for Ollama.
+# If Ollama is installed, the models you have downloaded with it are offered
+# alongside the online services, with no key. If Ollama is installed but not
+# running, it is started (hidden) the first time one of its models is needed.
+# Only models downloaded to this computer are used: the cloud models Ollama
+# can also list (":cloud") are left out.
+#
+# Its models are named "ollama/" and Ollama's own name ("ollama/qwen3:8b"),
+# so that the service a model belongs to can be told from its name.
+
+OLLAMA_PORT = 11434
+OLLAMA_CONTEXT = 32768      # the context length Ollama is started with, when Antares Code starts it
+OLLAMA_START_WAIT = 30      # seconds to wait for Ollama to answer after starting it
+
+# Good local coding models that can use tools, the best first.
+OLLAMA_FAVOURITES = ["qwen3-coder", "devstral", "gpt-oss", "qwen3", "qwen2.5-coder", "llama3.1", "mistral"]
+
+# Where Ollama answers: OLLAMA_HOST if it is set ("0.0.0.0:11434",
+# "http://box:11434"), otherwise this computer.
+to ollama_root() {
+    h = env("OLLAMA_HOST")
+    when h == nothing or trim(h) == "" { give "http://127.0.0.1:{OLLAMA_PORT}" }
+    h = trim(h)
+    scheme = "http://"
+    when begins(lower(h), "https://") {
+        scheme = "https://"
+        h = slice(h, 8)
+    } else when begins(lower(h), "http://") {
+        h = slice(h, 7)
+    }
+    while ends(h, "/") { h = slice(h, 0, len(h) - 1) }
+    # "listen everywhere" isn't an address to connect to
+    when h == "" or begins(h, "0.0.0.0") { h = "127.0.0.1" + slice(h, min(len(h), 7)) }
+    when not has(h, ":") { h += ":{OLLAMA_PORT}" }
+    give scheme + h
+}
+
+# The version of the Ollama that is answering, or nothing if none is.
+to ollama_up() {
+    try {
+        v = json(fetch(ollama_root() + "/api/version", {timeout: 3}))
+        give text(arg(v, "version", "?"))
+    } else problem {
+        give nothing
+    }
+}
+
+# Where the ollama program is installed, or nothing.
+to ollama_exe() {
+    places = []
+    when WINDOWS {
+        local = env("LOCALAPPDATA")
+        when local != nothing and trim(local) != "" { places = push(places, replace(trim(local), "\\", "/") + "/Programs/Ollama/ollama.exe") }
+        each pf in [env("ProgramFiles"), env("ProgramW6432")] {
+            when pf != nothing and trim(pf) != "" { places = push(places, replace(trim(pf), "\\", "/") + "/Ollama/ollama.exe") }
+        }
+    } else {
+        places = ["/usr/local/bin/ollama", "/usr/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama"]
+    }
+    each f in places {
+        when exists(f) { give f }
+    }
+    # anywhere else on the PATH
+    finder = "command -v ollama"
+    when WINDOWS { finder = "where ollama" }
+    try {
+        r = shell(finder, {timeout: 10})
+        when r.code == 0 {
+            found = filter(map(lines(r.output), l => trim(replace(l, CR, ""))), l => l != "")
+            when len(found) > 0 and exists(found[0]) { give replace(found[0], "\\", "/") }
+        }
+    } else problem {
+        nothing
+    }
+    give nothing
+}
+
+# Looks for Ollama: running (answering), or installed. Gives yes if it can
+# be used: it is running with at least one downloaded model, or installed
+# but not running yet (it is started when needed).
+to detect_ollama() {
+    o = {checked: yes, installed: no, running: no, exe: nothing, version: nothing, started: OLLAMA.started}
+    v = ollama_up()
+    when v != nothing {
+        o.running = yes
+        o.installed = yes
+        o.version = v
+    }
+    o.exe = ollama_exe()
+    when o.exe != nothing { o.installed = yes }
+    change OLLAMA = o
+    when not o.installed { give no }
+    when not o.running { give yes }
+    try { give len(ollama_models()) > 0 } else problem { give no }
+}
+
+# The log of the Ollama that Antares Code started.
+to ollama_log() = DATA_DIR + "/ollama.log"
+
+# Starts `ollama serve` in the background, hidden, with a context long
+# enough for a coding agent (unless OLLAMA_CONTEXT_LENGTH says otherwise).
+to start_ollama(exe) {
+    dir = DATA_DIR + "/.request"
+    make_folder(dir)
+    log = native(ollama_log())
+    own_context = env("OLLAMA_CONTEXT_LENGTH") == nothing or trim(env("OLLAMA_CONTEXT_LENGTH")) == ""
+    when WINDOWS {
+        script = native(dir + "/ollama.cmd")
+        launcher = native(dir + "/ollama.js")
+        set_context = ""
+        when own_context { set_context = "@set OLLAMA_CONTEXT_LENGTH={OLLAMA_CONTEXT}" + CR + "\n" }
+        write(script, set_context + "@\"" + native(exe) + "\" serve > \"" + log + "\" 2>&1" + CR + "\n")
+        write(launcher, "new ActiveXObject(\"WScript.Shell\").Run('\"" + replace(script, "\\", "\\\\") + "\"', 0, false);\n")
+        r = shell("cscript //nologo \"" + launcher + "\"", {timeout: 30})
+        when r.code != 0 { fail("couldn't start Ollama: " + one_line(r.output + " " + r.errors, 200)) }
+    } else {
+        prefix = ""
+        when own_context { prefix = "OLLAMA_CONTEXT_LENGTH={OLLAMA_CONTEXT} " }
+        shell(prefix + "nohup \"" + exe + "\" serve > \"" + log + "\" 2>&1 &", {timeout: 30})
+    }
+    o = OLLAMA
+    o.started = yes
+    change OLLAMA = o
+}
+
+# Makes sure Ollama is answering, starting it if it is installed but not
+# running. Fails, in words that say what to do, if it can't be.
+to ensure_ollama() {
+    v = ollama_up()
+    when v == nothing and OLLAMA.exe == nothing {
+        detect_ollama()
+        when OLLAMA.running { v = OLLAMA.version }
+    }
+    when v == nothing and OLLAMA.exe != nothing {
+        show dim("  Starting Ollama…")
+        start_ollama(OLLAMA.exe)
+        t0 = clock()
+        while v == nothing and clock() - t0 < OLLAMA_START_WAIT {
+            wait(0.5)
+            v = ollama_up()
+        }
+        erase_line()
+        when v == nothing { fail("couldn't reach Ollama: it was started but didn't answer within {OLLAMA_START_WAIT} s (its log is {ollama_log()})") }
+    }
+    when v == nothing { fail("couldn't reach Ollama: it isn't running, and isn't installed on this computer (get it from {PROVIDERS.ollama.site})") }
+    o = OLLAMA
+    o.running = yes
+    o.installed = yes
+    o.version = v
+    change OLLAMA = o
+    give v
+}
+
+# The models downloaded to this computer, as "ollama/<name>", sorted. What
+# each can do is kept in OLLAMA_MODELS, by model: {tools, size, context}
+# (tools: yes, no, or nothing when this Ollama doesn't say).
+to ollama_models() {
+    ensure_ollama()
+    got = json(fetch(ollama_root() + "/api/tags", {timeout: 15}))
+    info = {}
+    ids = []
+    each m in arg(got, "models", []) {
+        name = text(arg(m, "name", arg(m, "model", "")))
+        low = lower(name)
+        cloud = arg(m, "remote_host", nothing) != nothing or arg(m, "remote_model", nothing) != nothing or ends(low, ":cloud") or ends(low, "-cloud")
+        caps = arg(m, "capabilities", nothing)
+        chat = not has(low, "embed")
+        tools = nothing
+        when kind(caps) == "list" {
+            chat = has(caps, "completion")
+            tools = has(caps, "tools")
+        }
+        when name != "" and chat and not cloud {
+            details = arg(m, "details", {})
+            when kind(details) != "map" { details = {} }
+            id = "ollama/" + name
+            ids = push(ids, id)
+            info[id] = {tools: tools, size: text(arg(details, "parameter_size", "")), context: arg(details, "context_length", nothing)}
+        }
+    }
+    change OLLAMA_MODELS = info
+    give sort(ids)
+}
+
+# What is known about a local model: {tools, size, context}.
+to ollama_info(id) = arg(OLLAMA_MODELS, id, {tools: nothing, size: "", context: nothing})
+
+# Up to two local models to suggest: the favourites first, and only ones
+# that can use tools (when Ollama says).
+to ollama_suggestions(ids) {
+    able = filter(ids, id => ollama_info(id).tools != no)
+    out = []
+    each f in OLLAMA_FAVOURITES {
+        each id in able {
+            when has(lower(id), f) and not has(out, id) and len(out) < 2 { out = push(out, id) }
+        }
+    }
+    each id in able {
+        when not has(out, id) and len(out) < 2 { out = push(out, id) }
+    }
+    give out
+}
+
+# A short note for a local model in lists: its size, and if it can't use tools.
+to ollama_note(id) {
+    i = ollama_info(id)
+    parts = []
+    when i.size != "" { parts = push(parts, i.size) }
+    parts = push(parts, "on this computer")
+    when i.tools == no { parts = push(parts, "can't use tools") }
+    give join(parts, " · ")
+}
+
+# How Ollama stands, for /keys and /status.
+to ollama_state() {
+    when not OLLAMA.checked { detect_ollama() }
+    when not OLLAMA.installed { give "not installed" }
+    n = len(keys(OLLAMA_MODELS))
+    when OLLAMA.running and n > 0 { give "running · {n} downloaded model(s)" }
+    when OLLAMA.running { give "running · no models downloaded (ollama pull qwen3)" }
+    give "installed · started when needed"
+}
+
+# Tokens of conversation before it is summarised: a local model's context is
+# usually shorter than an online one's, so it is summarised sooner.
+to compact_limit() {
+    when provider_of(current_model()) != "ollama" and not SETTINGS.local_only { give SETTINGS.compact_at }
+    room = OLLAMA_CONTEXT
+    given = env("OLLAMA_CONTEXT_LENGTH")
+    when given != nothing and number_or_nothing(trim(given)) != nothing { room = number_or_nothing(trim(given)) }
+    give min(SETTINGS.compact_at, floor(room * 0.6))
+}
+
+# ---------- local only, and the last resort ----------
+# With /local on, only models on this computer are used: the local model
+# (SETTINGS.local_model, or a good downloaded one picked by itself), then any
+# Ollama models among the backups. The online model and backups are kept as
+# they are, for /local off.
+#
+# Otherwise, online models come first, and when every one of them has failed
+# or is resting, the local model takes over as a last resort (unless
+# /local fallback off), so the work carries on.
+
+LOCAL_AFTER = 15            # seconds: an online model free again sooner than this is waited for, rather than going local
+
+# A good downloaded model that can use tools, picked by itself (looked for
+# once a session), or nothing.
+to auto_local() {
+    when LOCAL_AUTO == nothing {
+        pick = ""
+        when has_key("ollama") {
+            try {
+                picks = ollama_suggestions(ollama_models())
+                when len(picks) > 0 { pick = picks[0] }
+            } else problem {
+                pick = ""
+            }
+        }
+        change LOCAL_AUTO = pick
+    }
+    when LOCAL_AUTO == "" { give nothing }
+    give LOCAL_AUTO
+}
+
+# The local model chosen with /local model, or nothing.
+to chosen_local() {
+    m = SETTINGS.local_model
+    when kind(m) == "text" and provider_of(m) == "ollama" { give m }
+    give nothing
+}
+
+# The local model to use: the chosen one, or one picked by itself.
+to local_pick() {
+    when chosen_local() != nothing { give chosen_local() }
+    give auto_local()
+}
+
+# The models tried in local-only mode, in order.
+to local_chain() {
+    out = []
+    when chosen_local() != nothing { out = [chosen_local()] }
+    each id in model_chain() {
+        when provider_of(id) == "ollama" and not has(out, id) and len(out) < MAX_MODELS { out = push(out, id) }
+    }
+    when len(out) == 0 and auto_local() != nothing { out = [auto_local()] }
+    give out
+}
+
+# The models tried now, in order (without the last resort).
+to chain_in_use() {
+    when SETTINGS.local_only { give local_chain() }
+    give model_chain()
+}
+
+# The local model that takes over when every model in `chain` has failed,
+# or nothing: not in local-only mode (it is all local already), not when
+# turned off, and not when the chain has a local model of its own.
+to last_resort(chain) {
+    when SETTINGS.local_only or not SETTINGS.local_fallback or not has_key("ollama") { give nothing }
+    when len(filter(chain, id => provider_of(id) == "ollama")) > 0 { give nothing }
+    give local_pick()
+}
+
+# The last resort in words, without looking for Ollama's models (for the
+# banner and /status), or nothing when there is none.
+to last_resort_label() {
+    when SETTINGS.local_only or not SETTINGS.local_fallback or not has_key("ollama") { give nothing }
+    when len(filter(model_chain(), id => provider_of(id) == "ollama")) > 0 { give nothing }
+    when chosen_local() != nothing { give chosen_local() }
+    when LOCAL_AUTO != nothing and LOCAL_AUTO != "" { give LOCAL_AUTO }
+    give "a local Ollama model"
+}
+
+# Why local-only mode has nothing to use.
+to local_only_problem() {
+    when not has_key("ollama") { give "local-only mode is on, but Ollama isn't installed or has no models: get it from {PROVIDERS.ollama.site} and ollama pull qwen3 (or /local off)" }
+    give "local-only mode is on, but no downloaded model can use tools: ollama pull qwen3 gets one (or /local off)"
+}
+
+# Step 1 of the welcome screen, for Ollama: no key, just finding it and its
+# models. Gives the models, or nothing.
+to connect_ollama(w) {
+    show ""
+    show "  " + brand("✻ ") + bold("Ollama") + dim("  " + w.about)
+    show dim("    Looking for Ollama on this computer…")
+    usable = detect_ollama()
+    erase_line()
+    when not OLLAMA.installed {
+        show "    " + yellow("Ollama isn't installed on this computer.")
+        show "    " + dim("1.") + " Download it from " + bold(PROVIDERS.ollama.site) + " and install it"
+        show "    " + dim("2.") + " In a terminal, download a model that can use tools: " + bold("ollama pull qwen3")
+        show "    " + dim("3.") + " Come back and type " + bold("/setup")
+        answer = answer_to(brand("    Press Enter to open the download page (s: skip) › "))
+        when answer != nothing and not begins(lower(answer), "s") {
+            open_page(PROVIDERS.ollama.site)
+            show dim("    (Opened {PROVIDERS.ollama.site} in your browser.)")
+        }
+        give nothing
+    }
+    ids = []
+    try {
+        ids = ollama_models()
+    } else problem {
+        show "    " + red("✗ " + one_line(problem, 200))
+        give nothing
+    }
+    when len(ids) == 0 {
+        set_ollama_key(no)
+        show "    " + yellow("Ollama is installed, but no models are downloaded yet.")
+        show "    In a terminal, download one that can use tools, for example:"
+        show "      " + bold("ollama pull qwen3") + dim("        (about 5 GB; qwen3:1.7b is about 1.4 GB)")
+        show dim("    then type /setup again.")
+        give nothing
+    }
+    set_ollama_key(yes)
+    show "    " + green("✓ Found Ollama {OLLAMA.version}") + dim(" with {len(ids)} downloaded model(s): " + join(map(slice(ids, 0, min(len(ids), 6)), id => api_model(id)), ", "))
+    when len(filter(ids, id => ollama_info(id).tools != no)) == 0 {
+        show "    " + yellow("None of them can use tools, which a coding agent needs.") + dim(" ollama pull qwen3 gets one that can.")
+    }
+    give ids
+}
+
+# Ollama needs no key: KEYS.ollama only marks that it can be used.
+to set_ollama_key(on) {
+    ks = KEYS
+    ks.ollama = nothing
+    when on { ks.ollama = "ollama" }
+    change KEYS = ks
+}

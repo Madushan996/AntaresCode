@@ -1,8 +1,9 @@
-# Antares Code: a coding agent for the terminal, powered by NVIDIA's and
-# Google's Gemini models.
+# Antares Code: a coding agent for the terminal, powered by NVIDIA's,
+# Google's Gemini, OpenRouter's and Groq's models, and by models on your own
+# computer with Ollama.
 # Written entirely in Antares.
 #
-#   antares antares_code.ant [folder] [-m model[,backup,...]] [-p "prompt"] [--yolo] [--no-color]
+#   antares antares_code.ant [folder] [-m model[,backup,...]] [-p "prompt"] [--yolo] [--local] [--no-color]
 #
 # or, on Windows, acode.bat with the same options. Run it in (or point it
 # at) the project to work on; /help lists the commands.
@@ -11,6 +12,7 @@ use "lib/state"
 use "lib/guide"
 use "lib/ui"
 use "lib/api"
+use "lib/ollama"
 use "lib/tools"
 use "lib/web"
 use "lib/processes"
@@ -85,6 +87,8 @@ to read_message() {
 
 to main() {
     migrate_old_data()
+    # never set up before (the welcome screen hasn't been seen)
+    first_run = not exists(settings_path())
     load_settings()
     # the command line
     given = args()
@@ -108,8 +112,10 @@ to main() {
             set_for_this_run("mode", "yolo")
         } else when a == "--no-color" {
             set_for_this_run("color", no)
+        } else when a == "--local" {
+            set_for_this_run("local_only", yes)
         } else when a == "-h" or a == "--help" {
-            show "{APP_NAME}: antares antares_code.ant [folder] [-m model[,backup,...]] [-p \"prompt\"] [--yolo] [--no-color]"
+            show "{APP_NAME}: antares antares_code.ant [folder] [-m model[,backup,...]] [-p \"prompt\"] [--yolo] [--local] [--no-color]"
             give nothing
         } else {
             folder = a
@@ -118,23 +124,35 @@ to main() {
     }
 
     load_keys()
-    when len(filter(PROVIDER_ORDER, p => has_key(p))) == 0 {
+    connected = filter(PROVIDER_ORDER, p => has_key(p))
+    when len(connected) == 0 {
         when prompt != nothing {
             show red("No API key is set up. Start Antares Code once without -p to set one up,")
-            show "or set NVIDIA_API_KEY, GEMINI_API_KEY or OPENROUTER_API_KEY."
+            show "or set NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY or GROQ_API_KEY,"
+            show "or install Ollama (ollama.com/download) and download a model to use one on this computer."
             give nothing
         }
         when SETTINGS.color { clear() }
         when not run_setup(yes) { give nothing }
+    } else when first_run and prompt == nothing and connected == ["ollama"] {
+        # Ollama was found, but the welcome screen hasn't been seen: show it
+        # (Ollama is already ticked, so Enter carries on with its models)
+        when SETTINGS.color { clear() }
+        when not run_setup(yes) { give nothing }
+    }
+    when SETTINGS.local_only and len(local_chain()) == 0 {
+        show yellow("  " + upper(slice(local_only_problem(), 0, 1)) + slice(local_only_problem(), 1) + ".")
     }
     # a model whose service has no key: one from a service that does
-    when not has_key(provider()) {
+    when not SETTINGS.local_only and not has_key(provider()) {
         other = filter(PROVIDER_ORDER, p => has_key(p))[0]
         ids = []
         try { ids = provider_models(other, KEYS[other]) } else problem { ids = [] }
         chosen = default_model(other, ids)
         when chosen != nothing {
-            show dim("  (There is no {provider_name(provider())} key, so using {chosen} from {provider_name(other)}.)")
+            why = "There is no {provider_name(provider())} key"
+            when provider() == "ollama" { why = "Ollama isn't available" }
+            show dim("  ({why}, so using {chosen} from {provider_name(other)}.)")
             set_for_this_run("model_id", chosen)
         }
     }

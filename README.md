@@ -1,8 +1,9 @@
 # Antares Code
 
 A coding agent for the terminal, in the style of Claude Code, powered by
-NVIDIA's models (build.nvidia.com), Google's Gemini models (Google AI Studio)
-and OpenRouter's free models, and written entirely in
+NVIDIA's models (build.nvidia.com), Google's Gemini models (Google AI Studio),
+OpenRouter's free models, Groq's fast models, and models on your own computer
+with [Ollama](https://ollama.com), and written entirely in
 [Antares](https://github.com/Madushan996/Antares-Programming-Language).
 (It used to be called NV Code.)
 
@@ -15,8 +16,8 @@ Ask for a change in plain words. Antares Code reads your code, edits files,
 runs your tests, servers and commands, searches the web, fixes what fails, and
 tells you what it did. By default it works on its own from start to finish
 without asking; `/plan` makes it plan first and wait for your approval, and
-`/undo` takes back what it changed. You can switch between NVIDIA's, Gemini's and
-OpenRouter's free models at any time, and give it up to four backup models:
+`/undo` takes back what it changed. You can switch between NVIDIA's, Gemini's,
+OpenRouter's and Groq's free models, and your own Ollama models, at any time, and give it up to four backup models:
 when one is rate limited, busy, too slow or gives a broken reply, the next
 takes over by itself and the work carries on.
 
@@ -87,14 +88,20 @@ Then:
    ```
 
    Check it with `antares version`.
-2. **An API key** for at least one service (all three are free; the welcome
-   screen opens the right page for you):
+2. **An API key** for at least one service (all are free; the welcome
+   screen opens the right page for you), **or Ollama** with a model downloaded:
    - **Gemini**: at [aistudio.google.com/apikey](https://aistudio.google.com/apikey),
      choose *Create API key* (it starts with `AIza` or `AQ.`).
    - **OpenRouter**: at [openrouter.ai/keys](https://openrouter.ai/keys),
      choose *Create API Key* (it starts with `sk-or-`).
    - **NVIDIA**: sign in at [build.nvidia.com](https://build.nvidia.com) and
      choose *Get API Key* (it starts with `nvapi-`).
+   - **Groq**: at [console.groq.com/keys](https://console.groq.com/keys),
+     choose *Create API Key* (it starts with `gsk_`).
+   - **Ollama** (no key): install it from
+     [ollama.com/download](https://ollama.com/download) and download a model
+     that can use tools, such as `ollama pull qwen3`. Antares Code finds
+     Ollama by itself (see [Models on your computer: Ollama](#models-on-your-computer-ollama)).
 3. **Put the AntaresCode folder somewhere**, such as `C:\Tools\AntaresCode`, and add it
    to your PATH so `acode` works from any folder (Windows: Start, type
    "environment variables", Edit the system environment variables,
@@ -104,10 +111,12 @@ Then:
 The first time, a welcome screen takes you through five short steps (the last
 is optional):
 
-1. **Connect an AI service**: pick Gemini, OpenRouter or NVIDIA (or several).
-   For each, it shows how to get a key and opens the page in your browser
-   when you press Enter; paste the key, and it is checked with the service
-   straight away.
+1. **Connect an AI service**: pick Gemini, OpenRouter, NVIDIA, Groq or
+   Ollama (or several). For each online service, it shows how to get a key
+   and opens the page in your browser when you press Enter; paste the key,
+   and it is checked with the service straight away. Ollama needs no key: if
+   it is installed, it is already ticked ("found on this computer") and its
+   downloaded models are offered at step 2, so Enter carries on with them.
 2. **Choose a model**: good ones are listed under each service, and Enter
    takes the recommended one from the service you just connected. Some
    models are offered by two services (NVIDIA's
@@ -130,8 +139,8 @@ Then it shows a few tips and starts. `/setup` brings the welcome screen back
 to change any of it, `/keys` shows which keys are set, and `/reset` removes
 your keys and settings and starts again from the beginning (`/reset all`
 also erases memory and saved conversations). Keys can also come
-from the `NVIDIA_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` and
-`TAVILY_API_KEY` environment variables.
+from the `NVIDIA_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
+`GROQ_API_KEY` and `TAVILY_API_KEY` environment variables.
 
 Optional: **ripgrep** (`rg`) for faster searching, and **git** for
 `/review`, `/commit` and the best `/diff`.
@@ -146,6 +155,7 @@ name, still works.
 | `-m model` | Use this model (and remember it); `-m main,backup1,backup2` also sets its backups |
 | `-p "task"` | Do one task, print what happened, and exit (for scripts) |
 | `--yolo` | Never ask before edits and commands (this run only; already the default) |
+| `--local` | Local-only mode: use only models on this computer, with Ollama (this run only) |
 | `--no-color` | Plain text (this run only) |
 
 ## Talking to it
@@ -199,6 +209,10 @@ steps in a row, with no change that worked in between, it stops and says so.
 | `/fallback auto` | Picks good backups from every service you have a key for, other services first, and checks them |
 | `/fallback remove <position or name>` | Takes one out (`remove 1` makes the first backup the main model) |
 | `/fallback clear` / `reset` / `wait <s>` | No backups / try every model again now / how long a model gets before a backup takes over (default 120 s) |
+| `/local` | How local models stand: the mode, Ollama, the local model, and the last resort |
+| `/local on` / `off` | Local-only mode: only models on this computer are used / online models again |
+| `/local model [number, name or auto]` | The local model, for local-only mode and the last resort (`auto` picks a good one by itself) |
+| `/local fallback on` / `off` | Whether a local model takes over when every online model fails (on by default) |
 | `/usage` | Tokens used this session: in all, on average, and for each model, with failed requests (also `/tokens`) |
 | `/mode yolo` / `edits` / `ask` | Never ask and work on its own (the default) / edit freely but ask for commands / ask before edits and commands |
 | `/clear` | Starts a new conversation |
@@ -314,9 +328,11 @@ for next time. For bigger changes, `/plan` gives you a look at the plan first.
 ## Models
 
 `/model` lists every chat model your keys can use, NVIDIA's, then Gemini's,
-then OpenRouter's; the current one is marked with ●, and ★ marks models that
+then OpenRouter's, Groq's and Ollama's; the current one is marked with ●, and ★ marks models that
 were tested and answered tool calls quickly and correctly. A model's name says
-which service it is from: OpenRouter's end in `:free`, NVIDIA's have a slash
+which service it is from: Groq's start with `groq/` and Ollama's with
+`ollama/` (Antares Code adds these, and takes them off again before asking
+the service), OpenRouter's end in `:free`, NVIDIA's have a slash
 (`nvidia/...`, `mistralai/...`), and Gemini's have neither (`gemini-...`).
 
 - **Gemini**: the newest plain Flash model (such as `gemini-3.8-flash`) is
@@ -326,6 +342,14 @@ which service it is from: OpenRouter's end in `:free`, NVIDIA's have a slash
   ones are left out), such as `nvidia/nemotron-3-ultra-550b-a55b:free` and
   `cohere/north-mini-code:free`. Free models allow about 20 requests a minute
   and 50 a day (1000 a day once you've added $10 of credit to OpenRouter).
+- **Groq**: very fast open models, such as `groq/openai/gpt-oss-120b`,
+  `groq/moonshotai/kimi-k2-instruct-0905` and
+  `groq/llama-3.3-70b-versatile`. Its speech models and "compound" systems
+  are left out. The free tier limits each model's requests and tokens a
+  minute; a request larger than a model's per-minute token limit is said so
+  (waiting won't help: pick another model, or `/compact`).
+- **Ollama**: the models you have downloaded, such as `ollama/qwen3:8b`
+  (see below).
 
 NVIDIA's:
 
@@ -345,6 +369,58 @@ Backup models (below) deal with that by themselves. Switching with
 checks again later. Models that build.nvidia.com shows as playground-only ("API access
 not available yet") aren't offered to API keys, so they appear only once
 NVIDIA opens them.
+
+## Models on your computer: Ollama
+
+If [Ollama](https://ollama.com) is installed, Antares Code finds it by itself
+when it starts, and offers the models you have downloaded with it alongside
+the online services, with no key. They run on your own computer: private,
+free, with no rate limits, and working offline.
+
+- **Finding it**: it asks Ollama at `127.0.0.1:11434` (or `OLLAMA_HOST`, if
+  set), and looks for `ollama.exe` where the installer puts it (and on the
+  PATH).
+- **Starting it**: if Ollama is installed but not running, it is started,
+  hidden, the first time one of its models is needed, with a context of
+  32,768 tokens (unless `OLLAMA_CONTEXT_LENGTH` is set). Its log is
+  `ollama.log` in your settings folder.
+- **Which models**: only ones downloaded to this computer; Ollama's cloud
+  models (`:cloud`) are left out. `/model` shows each one's size, and marks
+  the ones that can't use tools, which a coding agent needs. Good ones to
+  download are `qwen3`, `qwen3-coder`, `gpt-oss` and `devstral`
+  (`ollama pull qwen3`); then `/models` lists them.
+- **Context**: a local model's context is shorter than an online one's, so
+  while one is in use the conversation is summarised sooner (at 60% of
+  Ollama's context).
+- Local models are slower on their first request (while they load) and on
+  computers without a strong graphics card. A local model also makes a good
+  last backup: it is never rate limited.
+
+`/keys` and `/status` show whether Ollama was found, and how many models it has.
+
+### The local last resort
+
+When Ollama is found, a local model is the last resort: when every online
+model (the main one and its backups) has failed or is resting, it takes over
+by itself, so the work carries on even with no rate limits left or no
+internet. A short wait is still waited for: an online model that will be free
+again within 15 seconds is used rather than the slower local one. Once an
+online model has rested, it is used again from the next request.
+
+The local model is the one chosen with `/local model`, or else a good
+downloaded one that can use tools, picked by itself. `/fallback` and
+`/status` show it below the backups; `/local fallback off` turns the last
+resort off. (If one of your backups is already an Ollama model, it is tried
+in its turn instead.)
+
+### Local only
+
+`/local on` (or `--local` for one run) uses only models on this computer:
+the local model, then any Ollama models among your backups. Nothing is sent
+to an online model service. Your online model and backups are kept, and
+`/local off` goes back to them. While it is on, `/model` lists only the
+local models and switches the local model. Web searches and update checks
+still use the internet.
 
 ## Backup models
 
@@ -408,7 +484,7 @@ Everything that is yours is kept in `.antares-code` in your user folder
 
 | In `.antares-code` | What it is |
 |---|---|
-| `keys.json` | Your API keys (NVIDIA, Gemini, OpenRouter) |
+| `keys.json` | Your API keys (NVIDIA, Gemini, OpenRouter, Groq, Tavily) |
 | `settings.json` | Your model, its backups, mode and other settings |
 | `sessions/` | Conversations, one per project folder, for `/resume` |
 | `memory/` | What it remembers about you and your projects |

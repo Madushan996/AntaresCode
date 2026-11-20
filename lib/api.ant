@@ -1,32 +1,64 @@
 # Antares Code: talking to the model services. NVIDIA (build.nvidia.com),
-# Google's Gemini (Google AI Studio) and OpenRouter (openrouter.ai) all speak
-# the OpenAI chat-completions format, so one set of code serves them all;
-# only the address and the key differ.
+# Google's Gemini (Google AI Studio), OpenRouter (openrouter.ai), Groq
+# (groq.com) and Ollama (models on your own computer, see lib/ollama.ant)
+# all speak the OpenAI chat-completions format, so one set of code serves
+# them all; only the address and the key differ.
 #
-# Which service a model belongs to is told by its name: OpenRouter's end in
-# ":free" (only its free models are offered), NVIDIA's are "maker/model"
-# (nvidia/nemotron-..., mistralai/...), and Gemini's have no slash
-# (gemini-..., gemma-...).
+# Which service a model belongs to is told by its name: Groq's start with
+# "groq/" and Ollama's with "ollama/" (put there by Antares Code, and taken
+# off again before the name is sent), OpenRouter's end in ":free" (only its
+# free models are offered), NVIDIA's are "maker/model" (nvidia/nemotron-...,
+# mistralai/...), and Gemini's have no slash (gemini-..., gemma-...).
 
 PROVIDERS = {
     nvidia: {name: "NVIDIA", base: "https://integrate.api.nvidia.com/v1", site: "https://build.nvidia.com", env: ["NVIDIA_API_KEY"], starts: ["nvapi-"]},
     gemini: {name: "Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", site: "https://aistudio.google.com/apikey", env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], starts: ["AIza", "AQ."]},
     openrouter: {name: "OpenRouter", base: "https://openrouter.ai/api/v1", site: "https://openrouter.ai/keys", env: ["OPENROUTER_API_KEY"], starts: ["sk-or-"]},
+    groq: {name: "Groq", base: "https://api.groq.com/openai/v1", site: "https://console.groq.com/keys", env: ["GROQ_API_KEY"], starts: ["gsk_"]},
+    # on this computer: no key, and its address can be changed with OLLAMA_HOST (see base_of)
+    ollama: {name: "Ollama", base: "http://127.0.0.1:11434/v1", site: "https://ollama.com/download", env: [], starts: []},
     # not a model service: web search (see lib/web.ant)
     tavily: {name: "Tavily", base: "https://api.tavily.com", site: "https://app.tavily.com", env: ["TAVILY_API_KEY"], starts: ["tvly-"]},
 }
-PROVIDER_ORDER = ["nvidia", "gemini", "openrouter"]
+PROVIDER_ORDER = ["nvidia", "gemini", "openrouter", "groq", "ollama"]
 
 # OpenRouter's free models change; these are tried first, in this order.
 OPENROUTER_FAVOURITES = ["nemotron-3-ultra", "north-mini-code", "nemotron-3.5-super", "gemma-4-31b", "qwen", "deepseek", "gpt-oss", "llama", "nemotron"]
 
-# Words in a model's name that mark it as something other than a chat model.
-NOT_CHAT = ["embed", "safety", "guard", "clip", "detector", "retriev", "translate", "calibration", "reward", "starcoder", "parse", "ocr", "rerank", "imagen", "veo", "tts", "image", "aqa", "audio", "live", "robotics"]
+# Groq's models that are quick and good with tools, the best first.
+GROQ_FAVOURITES = ["gpt-oss-120b", "kimi-k2", "llama-3.3-70b", "qwen3", "gpt-oss-20b", "llama-4"]
+
+# Words in a model's name that mark it as something other than a chat model
+# (Groq also offers speech models, and "compound" systems that bring their
+# own tools and won't take ours).
+NOT_CHAT = ["embed", "safety", "guard", "clip", "detector", "retriev", "translate", "calibration", "reward", "starcoder", "parse", "ocr", "rerank", "imagen", "veo", "tts", "image", "aqa", "audio", "live", "robotics", "whisper", "orpheus", "playai", "compound"]
 
 to provider_of(id) {
+    when begins(text(id), "groq/") { give "groq" }
+    when begins(text(id), "ollama/") { give "ollama" }
     when ends(text(id), ":free") { give "openrouter" }
     when has(text(id), "/") { give "nvidia" }
     give "gemini"
+}
+
+# The name the service itself knows a model by: Groq's and Ollama's without
+# the "groq/" or "ollama/" in front.
+to api_model(id) {
+    p = provider_of(id)
+    when p == "groq" or p == "ollama" { give slice(text(id), len(p) + 1) }
+    give text(id)
+}
+
+# The address of a service's API.
+to base_of(p) {
+    when p == "ollama" { give ollama_root() + "/v1" }
+    give PROVIDERS[p].base
+}
+
+# Why a model's service can't be used.
+to no_key_problem(p) {
+    when p == "ollama" { give "Ollama isn't installed on this computer, or has no models downloaded: get it from {PROVIDERS.ollama.site}, then ollama pull a model" }
+    give "there is no {provider_name(p)} API key: /setup adds one"
 }
 to provider() = provider_of(SETTINGS.model_id)
 to provider_name(p) = PROVIDERS[p].name
@@ -79,9 +111,11 @@ to load_keys() {
             v = env(name)
             when k == nothing and v != nothing and trim(v) != "" { k = trim(v) }
         }
-        when k == nothing and has(saved, p) and kind(saved[p]) == "text" and trim(saved[p]) != "" { k = trim(saved[p]) }
+        when k == nothing and p != "ollama" and has(saved, p) and kind(saved[p]) == "text" and trim(saved[p]) != "" { k = trim(saved[p]) }
         found[p] = k
     }
+    # Ollama needs no key: it is used when it is found on this computer
+    when detect_ollama() { found.ollama = "ollama" }
     # the key file of earlier versions, next to the program
     when found.nvidia == nothing {
         each name in ["NVDIA.txt", "NVIDIA.txt", "nvidia_key.txt", "key.txt"] {
@@ -114,7 +148,13 @@ to save_key(p, k) {
     change KEYS = ks
 }
 
-to has_key(p) = KEYS[p] != nothing
+to has_key(p) = has(KEYS, p) and KEYS[p] != nothing
+
+# How a service's key stands, for /keys and /status.
+to key_note(p) {
+    when p == "ollama" { give ollama_state() }
+    give masked(arg(KEYS, p, nothing))
+}
 
 # A key shown safely: its start and its last four characters.
 to masked(k) {
@@ -159,9 +199,11 @@ to scripted_reply(id) {
 # ready to take over).
 to post_chat(id, body, limit, can_skip) {
     p = provider_of(id)
-    when not has_key(p) { fail("there is no {provider_name(p)} API key: /setup adds one") }
+    when not has_key(p) { fail(no_key_problem(p)) }
     when TEST_REPLIES != nothing { give scripted_reply(id) }
-    url = PROVIDERS[p].base + "/chat/completions"
+    # started now if it is installed but not running
+    when p == "ollama" { ensure_ollama() }
+    url = base_of(p) + "/chat/completions"
     name = provider_name(p)
     when not SETTINGS.color or PRINT_MODE or not WINDOWS {
         show waiting_text()
@@ -271,6 +313,15 @@ to explain_problem(problem) {
     low = lower(problem)
     backups = ""
     when len(model_chain()) == 1 { backups = " Backup models (/fallback auto) let it switch by itself next time." }
+    when provider_of(id) == "ollama" {
+        when has(problem, "error 404") or has(low, "not found") { give "{api_model(id)} isn't downloaded in Ollama. In a terminal: ollama pull {api_model(id)}  (or pick another with /model)" }
+        when has(low, "couldn't reach") { give "Ollama isn't answering. Start the Ollama app (or run ollama serve), then try again." + backups }
+        when has(low, "does not support tools") { give "{api_model(id)} can't use tools, which a coding agent needs. Pick another with /model, or ollama pull qwen3." }
+        when has(low, "timed out") { give "{api_model(id)} took too long to answer. Local models are slower on the first request (while they load) and on computers without a strong graphics card; a smaller model may suit better." + backups }
+    }
+    when provider_of(id) == "groq" and has(lower(problem), "tokens per minute") and (has(problem, "error 413") or has(lower(problem), "request too large")) {
+        give "The request is larger than Groq's free tier allows a model in a minute. Pick a model with a higher limit with /model, or /compact to make the conversation shorter." + backups
+    }
     when has(problem, "error 401") or has(problem, "error 403") or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") {
         give "{name} didn't accept the API key. /setup enters it again."
     } else when has(problem, "error 402") {
@@ -316,7 +367,13 @@ to model_chain() {
 
 # The model doing the work: the one that answered last, if it's still in the chain.
 to current_model() {
-    when ACTIVE_MODEL != nothing and has(model_chain(), ACTIVE_MODEL) { give ACTIVE_MODEL }
+    when ACTIVE_MODEL != nothing and SETTINGS.local_only and provider_of(ACTIVE_MODEL) == "ollama" { give ACTIVE_MODEL }
+    # the last to answer: one in the chain, or the local last resort
+    when ACTIVE_MODEL != nothing and not SETTINGS.local_only and (has(model_chain(), ACTIVE_MODEL) or provider_of(ACTIVE_MODEL) == "ollama") { give ACTIVE_MODEL }
+    when SETTINGS.local_only {
+        chain = local_chain()
+        when len(chain) > 0 { give chain[0] }
+    }
     give SETTINGS.model_id
 }
 
@@ -414,6 +471,9 @@ to failure_of(problem, strikes) {
     when n == 401 or n == 403 or has(low, "api key not valid") or has(problem, "API_KEY_INVALID") { give {kind: "key", reason: "the key wasn't accepted", rest: 86400, final: yes} }
     when n == 402 { give {kind: "key", reason: "needs credit", rest: 86400, final: yes} }
     when n == 404 { give {kind: "gone", reason: "not available", rest: 86400, final: yes} }
+    # Groq's free tier: a request larger than a model's tokens-per-minute
+    # limit, which waiting won't fix
+    when n == 413 and has(low, "tokens per minute") { give {kind: "refused", reason: "too large for its per-minute token limit", rest: 300, final: yes} }
     when n == 429 or has(low, "rate limit") or has(low, "resource_exhausted") or has(low, "too many requests") {
         daily = has(low, "per-day") or has(low, "per day") or has(low, "daily") or has(low, "perday")
         rest = backoff(10, strikes)
@@ -554,8 +614,11 @@ to note_failure(id) {
 
 # Sends a chat request to the chain of models: the first that isn't resting,
 # and on to the next when one fails. With only one model, it waits and tries
-# that one again when the service is busy. `tools` is yes (all of them), no
-# (none) or a list of tool descriptions.
+# that one again when the service is busy. When every model has failed or is
+# resting (and none will be free within LOCAL_AFTER seconds), a local Ollama
+# model takes over as a last resort (see lib/ollama.ant). In local-only mode,
+# the chain is the local models. `tools` is yes (all of them), no (none) or a
+# list of tool descriptions.
 to nv_chat(messages, tools) {
     body = {messages: messages, max_tokens: SETTINGS.max_tokens, temperature: SETTINGS.temperature}
     specs = []
@@ -568,25 +631,60 @@ to nv_chat(messages, tools) {
         body.tools = specs
         body.tool_choice = "auto"
     }
-    chain = filter(model_chain(), id => has_key(provider_of(id)))
-    when len(chain) == 0 { fail("there is no {provider_name(provider())} API key: /setup adds one") }
+    spare = nothing         # the last resort: looked for only when it is needed
+    spare_looked = no
+    when SETTINGS.local_only {
+        chain = filter(local_chain(), id => has_key("ollama"))
+        when len(chain) == 0 { fail(local_only_problem()) }
+    } else {
+        chain = filter(model_chain(), id => has_key(provider_of(id)))
+        when len(chain) == 0 {
+            spare = last_resort(chain)
+            spare_looked = yes
+            when spare == nothing { fail(no_key_problem(provider())) }
+        }
+    }
     single = len(chain) == 1
     before = ACTIVE_MODEL
     tried = []
     failed = 0
     last_problem = ""
     pauses = 0
+    told = no               # the last resort was announced
     while yes {
         id = next_model(chain, tried)
+        free_in = LOCAL_AFTER + 1
+        when len(chain) > 0 { free_in = soonest_free(chain) }
+        # every model failed or is resting, and none is free again soon: the
+        # local model takes over, rather than waiting or giving up
+        when id == nothing and free_in > LOCAL_AFTER {
+            when not spare_looked {
+                spare = last_resort(chain)
+                spare_looked = yes
+            }
+            when spare != nothing and not has(tried, spare) and rest_left(spare) == 0 {
+                id = spare
+                when not told and failed > 0 {
+                    show yellow("  ↪ every online model failed or is resting") + dim(" · the local model {spare} takes over (last resort)")
+                } else when not told and len(chain) > 0 {
+                    show dim("  (every online model is resting; the local model {spare} takes over meanwhile)")
+                }
+                told = yes
+            }
+        }
         # all resting, and none tried yet: try the one that is free soonest
         # rather than give up without asking any
-        when id == nothing and failed == 0 { id = soonest_untried(chain, tried) }
+        when id == nothing and failed == 0 and len(chain) > 0 { id = soonest_untried(chain, tried) }
         when id == nothing {
-            wait_for = soonest_free(chain)
+            wait_for = MAX_PAUSE + 1
+            when len(chain) > 0 { wait_for = soonest_free(chain) }
             pauses += 1
             when pauses > 2 or wait_for > MAX_PAUSE {
                 when single and last_problem != "" { fail(last_problem) }
-                fail(all_failed(chain))
+                when len(chain) == 0 and last_problem != "" { fail(last_problem) }
+                listed = chain
+                when spare != nothing and has(tried, spare) { listed = push(chain, spare) }
+                fail(all_failed(listed))
             }
             secs = max(1, round(wait_for + 0.5))
             when single {
@@ -601,10 +699,12 @@ to nv_chat(messages, tools) {
         tried = push(tried, id)
         when failed == 0 and before != nothing and id != before and has(chain, before) and place_in(chain, id) < place_in(chain, before) {
             show dim("  ↩ {id} has rested; back to it")
+        } else when failed == 0 and before != nothing and id != before and has(chain, id) and not has(chain, before) and provider_of(before) == "ollama" {
+            show dim("  ↩ {id} is ready again; back to it from the local model")
         }
         h = health_of(id)
         sent = body
-        sent["model"] = id
+        sent["model"] = api_model(id)
         when h.short and sent.max_tokens > 8192 { sent.max_tokens = 8192 }
         # with a backup ready, don't wait the whole timeout for a slow model
         others = len(filter(chain, c => not has(tried, c) and rest_left(c) == 0)) > 0
@@ -628,12 +728,25 @@ to nv_chat(messages, tools) {
                 skip
             }
             f = failure_of(problem, h.strikes)
-            last_problem = problem
             failed += 1
             set_health(id, {until: clock() + f.rest, strikes: h.strikes + 1, reason: f.reason, short: h.short})
             note_failure(id)
+            # the last resort failed too: what the online models said is kept
+            when id == spare {
+                show yellow("  ↪ {id}: {f.reason}")
+                when last_problem == "" { last_problem = problem }
+                skip
+            }
+            last_problem = problem
             when single {
-                when f.final or f.kind == "timeout" { fail(problem) }
+                when f.final or f.kind == "timeout" {
+                    when not spare_looked {
+                        spare = last_resort(chain)
+                        spare_looked = yes
+                    }
+                    when spare == nothing or has(tried, spare) or rest_left(spare) > 0 { fail(problem) }
+                    show yellow("  ↪ {id}: {f.reason}")
+                }
                 skip
             }
             nxt = next_model(chain, tried)
@@ -660,14 +773,26 @@ to nv_chat(messages, tools) {
 
 to chat_model(id) {
     low = lower(id)
+    # Ollama says itself what its models can do (see ollama_models)
+    when provider_of(id) == "ollama" { give yes }
     when provider_of(id) == "gemini" and not (begins(low, "gemini") or begins(low, "gemma")) { give no }
     give len(filter(NOT_CHAT, w => has(low, w))) == 0
 }
 
 # The chat models one service offers to a key, sorted. From OpenRouter, only
-# the free ones that can use tools.
+# the free ones that can use tools; from Ollama, the ones downloaded to this
+# computer.
 to provider_models(p, key) {
-    got = json(fetch(PROVIDERS[p].base + "/models", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}))
+    when p == "ollama" { give ollama_models() }
+    got = json(fetch(base_of(p) + "/models", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}))
+    when p == "groq" {
+        out = []
+        each m in got.data {
+            id = "groq/" + text(m.id)
+            when arg(m, "active", yes) != no and chat_model(id) { out = push(out, id) }
+        }
+        give sort(out)
+    }
     when p == "openrouter" {
         free = []
         each m in got.data {
@@ -689,7 +814,8 @@ to nv_models(refresh) {
     when len(MODEL_LIST) > 0 and not refresh { give MODEL_LIST }
     found = []
     each p in PROVIDER_ORDER {
-        when has_key(p) {
+        # in local-only mode, only the models on this computer
+        when has_key(p) and (not SETTINGS.local_only or p == "ollama") {
             try {
                 each id in provider_models(p, KEYS[p]) { found = push(found, id) }
             } else problem {
@@ -697,6 +823,7 @@ to nv_models(refresh) {
             }
         }
     }
+    when len(found) == 0 and SETTINGS.local_only { fail(local_only_problem()) }
     when len(found) == 0 { fail("no service gave a list of models; check your keys with /setup") }
     change MODEL_LIST = found
     give found
@@ -709,6 +836,7 @@ to recommended(id) {
     when has(RECOMMENDED, id) { give yes }
     low = lower(id)
     when provider_of(id) == "openrouter" { give len(filter(slice(OPENROUTER_FAVOURITES, 0, 4), f => has(low, f))) > 0 }
+    when provider_of(id) == "groq" { give len(filter(slice(GROQ_FAVOURITES, 0, 3), f => has(low, f))) > 0 }
     when provider_of(id) == "gemini" {
         give low == "gemini-flash-latest" or low == "gemini-pro-latest" or gemini_version(id) != nothing
     }
@@ -726,12 +854,16 @@ to gemini_version(id) {
 # A quick check that a model answers and can call a tool.
 to test_model(id) {
     p = provider_of(id)
-    when not has_key(p) { give {ok: no, tools: no, seconds: 0, problem: "there is no {provider_name(p)} API key (/setup adds one)."} }
+    when not has_key(p) { give {ok: no, tools: no, seconds: 0, problem: no_key_problem(p) + "."} }
     probe = [{type: "function", function: {name: "list_files", description: "Lists the files in a folder", parameters: {type: "object", properties: {path: {type: "string"}}, required: ["path"]}}}]
-    body = {"model": id, max_tokens: 512, tools: probe, messages: [{role: "user", content: "List the files in the folder src. Use your tool."}]}
+    body = {"model": api_model(id), max_tokens: 512, tools: probe, messages: [{role: "user", content: "List the files in the folder src. Use your tool."}]}
+    # a local model is loaded into memory on its first request, which takes a while
+    limit = 45
+    when p == "ollama" { limit = 180 }
     t0 = clock()
     try {
-        r = json(fetch(PROVIDERS[p].base + "/chat/completions", {headers: auth_headers_for(p), body: body, timeout: 45}))
+        when p == "ollama" { ensure_ollama() }
+        r = json(fetch(base_of(p) + "/chat/completions", {headers: auth_headers_for(p), body: body, timeout: limit}))
         msg = r.choices[0].message
         tools_ok = has(msg, "tool_calls") and msg.tool_calls != nothing and len(msg.tool_calls) > 0
         give {ok: yes, tools: tools_ok, seconds: clock() - t0, problem: ""}
@@ -741,7 +873,11 @@ to test_model(id) {
         change TRYING = id
         why = explain_problem(problem)
         change TRYING = was
-        when has(problem, "timed out") { why = "it didn't answer within 45 s (busy, or switched off for now)." }
+        when has(problem, "timed out") and p == "ollama" {
+            why = "it didn't answer within {limit} s (too large for this computer? a smaller model may suit better)."
+        } else when has(problem, "timed out") {
+            why = "it didn't answer within {limit} s (busy, or switched off for now)."
+        }
         give {ok: no, tools: no, seconds: clock() - t0, problem: why}
     }
 }
@@ -755,7 +891,7 @@ to check_key(p, key) {
             fetch(PROVIDERS[p].base + "/usage", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30})
             give {ok: yes, count: 0, models: [], problem: ""}
         }
-        when p == "openrouter" { fetch(PROVIDERS[p].base + "/key", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}) }
+        when p == "openrouter" { fetch(base_of(p) + "/key", {headers: {Authorization: "Bearer " + key, Accept: "application/json"}, timeout: 30}) }
         ids = provider_models(p, key)
         give {ok: yes, count: len(ids), models: ids, problem: ""}
     } else problem {

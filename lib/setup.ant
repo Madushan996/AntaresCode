@@ -53,6 +53,14 @@ to suggested_models(p, ids) {
         each id in RECOMMENDED {
             when has(ids, id) and len(out) < 2 { out = push(out, id) }
         }
+    } else when p == "ollama" {
+        out = ollama_suggestions(ids)
+    } else when p == "groq" {
+        each f in GROQ_FAVOURITES {
+            each id in ids {
+                when has(lower(id), f) and not has(out, id) and len(out) < 2 { out = push(out, id) }
+            }
+        }
     } else when p == "openrouter" {
         each f in OPENROUTER_FAVOURITES {
             each id in ids {
@@ -111,6 +119,8 @@ WELCOME = [
     {p: "gemini", about: "Google's Gemini models, with a generous free tier", get: "Sign in with a Google account and choose Create API key"},
     {p: "openrouter", about: "free models from many makers (NVIDIA, Google, Cohere…), with one key", get: "Sign in (Google or GitHub works) and choose Create API Key"},
     {p: "nvidia", about: "NVIDIA's own hosted models, free for developers", get: "Sign in, open any model, and choose Get API Key"},
+    {p: "groq", about: "very fast open models (GPT-OSS, Llama, Qwen, Kimi), with a free tier", get: "Sign in (Google or GitHub works), and choose Create API Key"},
+    {p: "ollama", about: "models downloaded to this computer: no key, private, works offline", get: ""},
 ]
 
 to step_title(n, total, title) {
@@ -140,6 +150,8 @@ to answer_to(question) {
 # Connects one service: shows how to get a key, opens the page if wanted,
 # and checks the key. Gives the service's models, or nothing.
 to connect(w) {
+    # no key: found on this computer instead
+    when w.p == "ollama" { give connect_ollama(w) }
     info = PROVIDERS[w.p]
     show ""
     show "  " + brand("✻ ") + bold(info.name) + dim("  " + w.about)
@@ -206,13 +218,16 @@ to run_setup(first) {
 
     # ---- 1. services
     step_title(1, total, "Connect an AI service")
-    show "  Antares Code needs at least one of these. All three have free models:"
+    show "  Antares Code needs at least one of these. All have free models, and Ollama runs"
+    show "  models on this computer, with no key:"
     show ""
     each i in range(len(WELCOME)) {
         w = WELCOME[i]
         mark = "  "
         when has_key(w.p) { mark = green("✓ ") }
-        show "   " + mark + brand("{i + 1}") + "  " + bold(pad(PROVIDERS[w.p].name, 12)) + dim(w.about)
+        found = ""
+        when w.p == "ollama" and has_key("ollama") { found = green("  (found on this computer)") }
+        show "   " + mark + brand("{i + 1}") + "  " + bold(pad(PROVIDERS[w.p].name, 12)) + dim(w.about) + found
     }
     show ""
     connected_any = len(filter(PROVIDER_ORDER, p => has_key(p))) > 0
@@ -234,6 +249,7 @@ to run_setup(first) {
     when len(filter(PROVIDER_ORDER, p => has_key(p))) == 0 {
         show ""
         show red("  No service is connected yet, so Antares Code can't talk to a model.")
+        show "  (Or install Ollama from {PROVIDERS.ollama.site} and download a model, to use models on this computer.)"
         show "  Get a key from one of the pages above, then start Antares Code again (or type /setup)."
         give no
     }
@@ -290,6 +306,10 @@ to run_setup(first) {
         }
         set_setting("model_id", pick)
         show "  " + green("✓ ") + "Using " + bold(pick) + dim(" on {provider_name(provider_of(pick))}")
+        when has_key("ollama") and provider_of(pick) != "ollama" {
+            show dim("  Ollama is on this computer: when every online model fails, a local model takes over,")
+            show dim("  and /local on uses only local models.")
+        }
         # backups: the other suggestions, other services first (a rate limit
         # is per service)
         spare = filter(options, id => id != pick and provider_of(id) != provider_of(pick))
@@ -382,13 +402,17 @@ to run_setup(first) {
 to show_keys() {
     show ""
     each p in push(PROVIDER_ORDER, "tavily") {
-        k = KEYS[p]
+        k = arg(KEYS, p, nothing)
         state = dim("not set")
         when k != nothing { state = green("set") + dim("  " + masked(k)) }
+        when p == "ollama" {
+            state = dim(ollama_state())
+            when k != nothing { state = green("found") + dim("  " + ollama_state() + " · no key needed") }
+        }
         when p == "tavily" { state += dim("  (web search)") }
         show "  " + bold(pad(provider_name(p), 12)) + state
     }
-    show dim("  Kept in {keys_file()} (or from NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, TAVILY_API_KEY). /setup changes them.")
+    show dim("  Kept in {keys_file()} (or from NVIDIA_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, GROQ_API_KEY, TAVILY_API_KEY). /setup changes them.")
     show ""
 }
 
@@ -409,7 +433,7 @@ to reset_data(everything) {
     }
     gone = push(gone, "your API keys")
     gone = push(gone, "your settings")
-    change KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing}
+    change KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing, groq: nothing, ollama: nothing, tavily: nothing}
     change SETTINGS = DEFAULT_SETTINGS
     change RUN_ONLY = {}
     change ALWAYS = []
@@ -448,7 +472,7 @@ to command_reset(rest) {
     show green("  ✓ Removed " + said + ".")
     # keys set in the environment come back by themselves
     load_keys()
-    from_env = filter(PROVIDER_ORDER, p => has_key(p))
+    from_env = filter(PROVIDER_ORDER, p => has_key(p) and p != "ollama")
     when len(from_env) > 0 {
         show yellow("  (A key for " + join(map(from_env, p => provider_name(p)), " and ") + " is set in an environment variable, so it stays; remove the variable to reset it too.)")
     }

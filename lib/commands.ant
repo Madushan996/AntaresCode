@@ -63,14 +63,16 @@ to show_help() {
         ["/review", "review the changes not yet committed, for bugs"],
         ["/commit", "commit the changes with a message written for them"],
         ["/setup", "the welcome screen again: services and keys, model, how it works, memory"],
-        ["/keys", "which API keys are set"],
+        ["/keys", "which API keys are set, and whether Ollama was found"],
         ["/update", "check for a new version, and install it"],
         ["/reset [all]", "remove your keys and settings and start again from the welcome screen (all: memory and conversations too)"],
-        ["/model", "pick a model from a numbered list (NVIDIA, Gemini and OpenRouter's free ones)"],
+        ["/model", "pick a model from a numbered list (NVIDIA, Gemini, OpenRouter's free ones, Groq, and Ollama's on this computer)"],
         ["/model <number or name>", "switch model (part of a name, words in any order)"],
         ["/models [word]", "list the chat models (refreshed), optionally only those containing a word"],
         ["/test [number or name]", "check that a model answers and can use tools"],
         ["/fallback", "backup models (up to 5 in all), used by themselves when one is busy or rate limited"],
+        ["/local [on|off]", "local-only mode: use only models on this computer, with Ollama; /local shows how it stands"],
+        ["/local model|fallback", "choose the local model; turn the local last resort (when every online model fails) on or off"],
         ["/fallback add|rm|auto", "add backups (numbers or names), take one out, or pick good ones for you"],
         ["/usage", "tokens used this session, in all and by model"],
         ["/mode yolo|edits|ask", "never ask, work on its own (default) / edit freely, ask for commands / ask before edits and commands"],
@@ -112,9 +114,10 @@ to show_help() {
 
 to model_line(i, id) {
     mark = "  "
-    when id == SETTINGS.model_id { mark = brand("● ") }
+    when (SETTINGS.local_only and id == current_model()) or (not SETTINGS.local_only and id == SETTINGS.model_id) { mark = brand("● ") }
     star = ""
     when recommended(id) { star = brand("  ★ recommended") }
+    when provider_of(id) == "ollama" { star += dim("  " + ollama_note(id)) }
     at = place_in(model_chain(), id)
     when at > 0 { star += dim("  backup {at}") }
     give "  " + mark + dim(pad(i, 3) + ".") + " " + id + star
@@ -156,7 +159,7 @@ to list_models(word, refresh) {
         give []
     }
     show ""
-    show bold("Chat models") + dim("  (★ = tested: fast, and good with tools)")
+    when SETTINGS.local_only { show bold("Models on this computer") + dim("  (local-only mode; /local off shows the online ones too)") } else { show bold("Chat models") + dim("  (★ = tested: fast, and good with tools)") }
     shown = 0
     last = ""
     each i in range(len(ids)) {
@@ -171,7 +174,7 @@ to list_models(word, refresh) {
             shown += 1
         }
     }
-    missing = filter(PROVIDER_ORDER, p => not has_key(p))
+    missing = filter(PROVIDER_ORDER, p => not has_key(p) and p != "ollama" and not SETTINGS.local_only)
     when len(missing) > 0 { show dim("\n  No key for " + join(map(missing, p => provider_name(p)), ", ") + ": /setup adds one.") }
     when shown == 0 {
         show dim("  No model names contain \"{word}\".")
@@ -202,6 +205,16 @@ to pick_model(choice) {
         show dim("  Type /model and the number of the one you want.")
         give nothing
     }
+    when begins(lower(c), "ollama/") and len(c) > 7 and not has(c, " ") {
+        c = "ollama/" + slice(c, 7)
+        show yellow("  {api_model(c)} isn't downloaded in Ollama (ollama pull {api_model(c)} gets it), but it will be tried.")
+        give c
+    }
+    when begins(lower(c), "groq/") and len(c) > 5 and not has(c, " ") {
+        c = "groq/" + slice(c, 5)
+        show yellow("  {c} isn't in Groq's list for this key, but it will be tried.")
+        give c
+    }
     parts = split(c, "/")
     when len(parts) == 2 and parts[0] != "" and parts[1] != "" and not has(c, " ") {
         show yellow("  {c} isn't in NVIDIA's list for this key, but it will be tried.")
@@ -223,6 +236,10 @@ to pick_model(choice) {
 # Switches model after checking that it answers: NVIDIA's free models are
 # sometimes busy or switched off, and finding out mid-task wastes minutes.
 to switch_model(id) {
+    when SETTINGS.local_only and provider_of(id) != "ollama" {
+        show yellow("  Local-only mode is on, so only models on this computer are used.") + dim(" /local off, then /model {id}.")
+        give nothing
+    }
     show dim("  Checking that {id} answers…")
     t = test_model(id)
     erase_line()
@@ -238,6 +255,14 @@ to switch_model(id) {
     } else {
         show dim("  ✓ answered in {fixed(t.seconds, 1)} s and used a tool correctly")
     }
+    # in local-only mode, the online model is kept for /local off
+    when SETTINGS.local_only {
+        set_setting("local_model", id)
+        forgive(id)
+        change ACTIVE_MODEL = nothing
+        show green("  Now using {id}") + dim(" on this computer (local only; saved for next time)")
+        give nothing
+    }
     set_setting("model_id", id)
     when has(SETTINGS.fallbacks, id) { set_fallbacks(SETTINGS.fallbacks) }
     forgive(id)
@@ -251,7 +276,7 @@ to command_model(rest) {
         when rest == "" {
             ids = list_models("", no)
             when len(ids) == 0 { give nothing }
-            answer = input(brand("  Model number or name (Enter keeps {SETTINGS.model_id}): "))
+            answer = input(brand("  Model number or name (Enter keeps {current_model()}): "))
             when answer == nothing or trim(answer) == "" { give nothing }
             id = pick_model(answer)
         } else {
@@ -286,14 +311,19 @@ to command_test(rest) {
 
 to command_status() {
     show ""
-    show "  " + dim(pad("Model", 12)) + SETTINGS.model_id + dim("  " + provider_name(provider()))
-    chain = model_chain()
+    chain = chain_in_use()
+    when len(chain) == 0 { chain = [SETTINGS.model_id] }
+    first_note = provider_name(provider_of(chain[0]))
+    when SETTINGS.local_only { first_note += " · local only (/local off)" }
+    show "  " + dim(pad("Model", 12)) + chain[0] + dim("  " + first_note)
     each i in range(1, len(chain)) { show "  " + dim(pad("Backup {i}", 12)) + chain[i] + dim("  " + provider_name(provider_of(chain[i]))) }
-    when current_model() != SETTINGS.model_id { show "  " + dim(pad("In use", 12)) + current_model() + dim("  (the last to answer)") }
-    show "  " + dim(pad("Keys", 12)) + join(map(PROVIDER_ORDER, p => provider_name(p) + " " + masked(KEYS[p])), dim(" · "))
+    spare = last_resort_label()
+    when spare != nothing { show "  " + dim(pad("Last resort", 12)) + spare + dim("  on this computer, when every online model fails") }
+    when current_model() != chain[0] { show "  " + dim(pad("In use", 12)) + current_model() + dim("  (the last to answer)") }
+    show "  " + dim(pad("Keys", 12)) + join(map(PROVIDER_ORDER, p => provider_name(p) + " " + key_note(p)), dim(" · "))
     show "  " + dim(pad("Folder", 12)) + WORKDIR
     show "  " + dim(pad("Mode", 12)) + SETTINGS.mode
-    show "  " + dim(pad("Context", 12)) + "about {conversation_tokens()} tokens ({len(MESSAGES)} messages; summarised at {SETTINGS.compact_at})"
+    show "  " + dim(pad("Context", 12)) + "about {conversation_tokens()} tokens ({len(MESSAGES)} messages; summarised at {compact_limit()})"
     show "  " + dim(pad("Used", 12)) + "{grouped(USAGE.input + USAGE.output)} tokens ({grouped(USAGE.input)} in, {grouped(USAGE.output)} out), {USAGE.calls} requests" + dim("  (/usage for each model)")
     finder = "built-in tools (install ripgrep for faster search)"
     when HAS_RG { finder = "ripgrep" }
@@ -463,6 +493,8 @@ to run_command_line(l) {
         command_test(rest)
     } else when cmd == "/fallback" or cmd == "/fallbacks" or cmd == "/backup" or cmd == "/backups" {
         command_fallback(rest)
+    } else when cmd == "/local" or cmd == "/offline" {
+        command_local(rest)
     } else when cmd == "/usage" or cmd == "/tokens" or cmd == "/cost" {
         command_usage()
     } else when cmd == "/mode" {
@@ -605,9 +637,13 @@ to set_fallbacks(ids) {
 # The chain of models, each with what it has done this session and whether
 # it is resting.
 to show_chain() {
-    chain = model_chain()
+    chain = chain_in_use()
     show ""
-    show bold("Models, in the order they are tried") + dim("  ({len(chain)} of {MAX_MODELS})")
+    when SETTINGS.local_only {
+        show bold("Models, in the order they are tried") + dim("  (local only: the Ollama ones; /local off for the rest)")
+    } else {
+        show bold("Models, in the order they are tried") + dim("  ({len(chain)} of {MAX_MODELS})")
+    }
     each i in range(len(chain)) {
         id = chain[i]
         role = "backup"
@@ -632,8 +668,15 @@ to show_chain() {
         }
         show "  " + brand(pad(i + 1, 2)) + "  " + pad(id, 46) + dim(pad(role, 8)) + state_note + used
     }
+    spare = last_resort_label()
+    when spare != nothing {
+        state_note = dim("when every model above fails")
+        when has_key("ollama") and chosen_local() != nothing and rest_left(chosen_local()) > 0 { state_note = yellow("resting {how_long(rest_left(chosen_local()))}") }
+        when ACTIVE_MODEL != nothing and provider_of(ACTIVE_MODEL) == "ollama" and not has(chain, ACTIVE_MODEL) { state_note = green("● in use") }
+        show "  " + brand(" ↓") + "  " + pad(spare, 46) + dim(pad("local", 8)) + state_note
+    }
     show ""
-    when len(chain) == 1 {
+    when len(chain) == 1 and not SETTINGS.local_only {
         show dim("  No backups yet. When a model is rate limited, busy, too slow or gives a broken reply,")
         show dim("  the next one takes over by itself. /fallback auto picks some from your services.")
     } else {
@@ -684,6 +727,7 @@ to fallback_add(t) {
                     set_fallbacks(push(SETTINGS.fallbacks, id))
                     forgive(id)
                     show green("  ✓ Added {id}") + dim(" as backup {len(model_chain()) - 1}, on {provider_name(provider_of(id))}")
+                    when SETTINGS.local_only and provider_of(id) != "ollama" { show dim("  (Not used while local-only mode is on.)") }
                 }
             }
         }
@@ -729,8 +773,8 @@ to fallback_auto() {
         give nothing
     }
     primary = SETTINGS.model_id
-    order = filter(PROVIDER_ORDER, p => has_key(p) and p != provider_of(primary))
-    when has_key(provider_of(primary)) { order = push(order, provider_of(primary)) }
+    order = filter(PROVIDER_ORDER, p => has_key(p) and p != provider_of(primary) and (not SETTINGS.local_only or p == "ollama"))
+    when has_key(provider_of(primary)) and (not SETTINGS.local_only or provider_of(primary) == "ollama") { order = push(order, provider_of(primary)) }
     lists = map(order, p => filter(suggested_models(p, filter(ids, id => provider_of(id) == p)), id => id != primary))
     candidates = []
     each round_no in range(2) {
@@ -842,9 +886,9 @@ to command_usage() {
 
 to banner() {
     rows = [
-        [["✻", "brand"], [" ", ""], [APP_NAME, "bold"], ["  {APP_VERSION} · a coding agent on NVIDIA, Gemini and OpenRouter models, written in Antares", "dim"]],
+        [["✻", "brand"], [" ", ""], [APP_NAME, "bold"], ["  {APP_VERSION} · a coding agent on NVIDIA, Gemini, OpenRouter, Groq and Ollama models, written in Antares", "dim"]],
         [],
-        [[pad("model", 8), "dim"], [SETTINGS.model_id, ""], ["  " + provider_name(provider()), "dim"]],
+        model_row(),
         backups_row(),
         [[pad("folder", 8), "dim"], [WORKDIR, ""]],
         [[pad("mode", 8), "dim"], [SETTINGS.mode, ""], [mode_note(), "dim"]],
@@ -861,12 +905,172 @@ to banner() {
     show ""
 }
 
+to model_row() {
+    when SETTINGS.local_only {
+        chain = local_chain()
+        when len(chain) == 0 { give [[pad("model", 8), "dim"], ["none", ""], ["  local only, but no local model can use tools: ollama pull qwen3, or /local off", "dim"]] }
+        give [[pad("model", 8), "dim"], [chain[0], ""], ["  Ollama · local only (/local off)", "dim"]]
+    }
+    give [[pad("model", 8), "dim"], [SETTINGS.model_id, ""], ["  " + provider_name(provider()), "dim"]]
+}
+
 to backups_row() {
-    chain = model_chain()
+    chain = chain_in_use()
+    spare = last_resort_label()
+    when len(chain) <= 1 and spare != nothing { give [[pad("backups", 8), "dim"], ["none", ""], ["  (/fallback auto adds some) · last resort: {spare}", "dim"]] }
+    when len(chain) <= 1 and SETTINGS.local_only { give [[pad("backups", 8), "dim"], ["none", ""], ["  (models on this computer only)", "dim"]] }
     when len(chain) == 1 { give [[pad("backups", 8), "dim"], ["none", ""], ["  (/fallback auto adds some, so a busy model doesn't stop the work)", "dim"]] }
     more = ""
     when len(chain) > 2 { more = ", +{len(chain) - 2} more" }
-    give [[pad("backups", 8), "dim"], [chain[1] + more, ""], ["  (/fallback)", "dim"]]
+    tail = "  (/fallback)"
+    when spare != nothing { tail = "  (/fallback) · last resort: {spare}" }
+    give [[pad("backups", 8), "dim"], [chain[1] + more, ""], [tail, "dim"]]
+}
+
+# ---------- models on this computer (/local) ----------
+
+to show_local() {
+    show ""
+    when SETTINGS.local_only {
+        show "  " + dim(pad("Mode", 13)) + bold("local only") + dim("  only models on this computer are used (/local off)")
+    } else {
+        show "  " + dim(pad("Mode", 13)) + "online models first" + dim("  (/local on uses only models on this computer)")
+    }
+    show "  " + dim(pad("Ollama", 13)) + ollama_state()
+    chosen = chosen_local()
+    when chosen != nothing {
+        show "  " + dim(pad("Local model", 13)) + chosen + dim("  (/local model auto lets it pick)")
+    } else {
+        auto = nothing
+        when has_key("ollama") { auto = auto_local() }
+        when auto != nothing { show "  " + dim(pad("Local model", 13)) + auto + dim("  picked by itself (/local model chooses one)") } else { show "  " + dim(pad("Local model", 13)) + dim("none that can use tools (ollama pull qwen3)") }
+    }
+    when SETTINGS.local_fallback {
+        show "  " + dim(pad("Last resort", 13)) + "on" + dim("  when every online model fails, the local model takes over (/local fallback off)")
+    } else {
+        show "  " + dim(pad("Last resort", 13)) + "off" + dim("  (/local fallback on)")
+    }
+    show ""
+}
+
+# /local model [number or name | auto]: the local model, for local-only mode
+# and the last resort.
+to local_choose(t) {
+    when lower(trim(t)) == "auto" {
+        set_setting("local_model", "")
+        change LOCAL_AUTO = nothing
+        change ACTIVE_MODEL = nothing
+        show green("  The local model is picked by itself now") + dim(" ({auto_local()})")
+        give nothing
+    }
+    ids = []
+    try { ids = ollama_models() } else problem {
+        show red("  " + explain_problem(problem))
+        give nothing
+    }
+    when len(ids) == 0 {
+        show yellow("  No models are downloaded in Ollama yet.") + dim(" In a terminal: ollama pull qwen3")
+        give nothing
+    }
+    c = trim(t)
+    when c == "" {
+        show ""
+        show bold("Models on this computer")
+        each i in range(len(ids)) {
+            mark = "  "
+            when ids[i] == local_pick() { mark = brand("● ") }
+            show "  " + mark + dim(pad(i + 1, 3) + ".") + " " + ids[i] + dim("  " + ollama_note(ids[i]))
+        }
+        show ""
+        answer = input(brand("  Number or name (Enter keeps it as it is) › "))
+        when answer == nothing or trim(answer) == "" { give nothing }
+        c = trim(answer)
+    }
+    id = nothing
+    n = number_or_nothing(c)
+    when n != nothing and n == floor(n) and n >= 1 and n <= len(ids) { id = ids[n - 1] }
+    when id == nothing and has(ids, c) { id = c }
+    when id == nothing and has(ids, "ollama/" + c) { id = "ollama/" + c }
+    when id == nothing {
+        matches = filter(ids, x => name_matches(x, c))
+        when len(matches) == 1 { id = matches[0] }
+        when len(matches) > 1 {
+            show yellow("  \"{c}\" matches " + join(matches, ", ") + ": say which.")
+            give nothing
+        }
+    }
+    when id == nothing {
+        show red("  No downloaded model matches \"{c}\".") + dim(" ollama pull {c} downloads it.")
+        give nothing
+    }
+    show dim("  Checking that {id} answers…")
+    check_result = test_model(id)
+    erase_line()
+    when not check_result.ok {
+        show red("  ✗ {id} isn't answering: " + check_result.problem)
+        give nothing
+    }
+    when not check_result.tools { show yellow("  ~ {id} answered but didn't use a tool when asked, so it may not work well as a coding agent.") }
+    set_setting("local_model", id)
+    forgive(id)
+    change ACTIVE_MODEL = nothing
+    show green("  The local model is now {id}") + dim(" (answered in {fixed(check_result.seconds, 1)} s)")
+}
+
+to command_local(rest) {
+    words = split(trim(rest))
+    sub = ""
+    more = ""
+    when len(words) > 0 {
+        sub = lower(words[0])
+        more = trim(slice(trim(rest), len(words[0])))
+    }
+    when sub == "" or sub == "status" {
+        show_local()
+    } else when sub == "on" or sub == "only" {
+        when not has_key("ollama") {
+            when detect_ollama() { set_ollama_key(yes) }
+        }
+        change LOCAL_AUTO = nothing
+        change MODEL_LIST = []
+        was = SETTINGS.local_only
+        s = SETTINGS
+        s.local_only = yes
+        change SETTINGS = s
+        chain = local_chain()
+        when len(chain) == 0 {
+            s.local_only = was
+            change SETTINGS = s
+            show yellow("  " + upper(slice(local_only_problem(), 0, 1)) + slice(local_only_problem(), 1) + ".")
+            give nothing
+        }
+        set_setting("local_only", yes)
+        change ACTIVE_MODEL = nothing
+        show green("  Local only: only models on this computer are used now") + dim(" ({chain[0]}).")
+        show dim("  Your online model and backups are kept for /local off. Web searches and update checks still go online.")
+    } else when sub == "off" or sub == "online" {
+        set_setting("local_only", no)
+        change MODEL_LIST = []
+        change ACTIVE_MODEL = nothing
+        show green("  Online models are used again") + dim(" ({SETTINGS.model_id}).")
+        spare = last_resort_label()
+        when spare != nothing { show dim("  When every online model fails, {spare} on this computer takes over.") }
+    } else when sub == "model" {
+        local_choose(more)
+    } else when sub == "fallback" or sub == "backup" or sub == "last" {
+        m = lower(more)
+        when m == "on" or m == "yes" {
+            set_setting("local_fallback", yes)
+            show green("  When every online model fails, a local model takes over.")
+        } else when m == "off" or m == "no" {
+            set_setting("local_fallback", no)
+            show green("  The local last resort is off:") + dim(" only your online models are used (unless /local on).")
+        } else {
+            show_local()
+        }
+    } else {
+        show yellow("  /local, /local on, /local off, /local model [name|auto], /local fallback on|off")
+    }
 }
 
 to mode_note() {

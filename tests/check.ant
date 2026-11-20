@@ -5,6 +5,7 @@ use "../lib/state"
 use "../lib/guide"
 use "../lib/ui"
 use "../lib/api"
+use "../lib/ollama"
 use "../lib/tools"
 use "../lib/web"
 use "../lib/processes"
@@ -460,6 +461,132 @@ TEST_REPLIES = {"nvidia/main-model": [scripted_call("write_file", {path: "gate_d
 check(agent_turn("make it print 2") == yes and len(filter(MESSAGES, m => m.role == "user" and begins(text(m.content), FINISH_NOTE))) == 1, "only one check a request")
 TEST_REPLIES = nothing
 start_conversation()
+
+# Groq and Ollama: told apart by the name Antares Code gives their models,
+# which is taken off again before the name is sent
+check(provider_of("groq/llama-3.3-70b-versatile") == "groq" and provider_of("groq/openai/gpt-oss-120b") == "groq", "Groq's models start with groq/, even with a maker's slash")
+check(provider_of("ollama/qwen3:8b") == "ollama" and provider_of("ollama/hf.co/x/y:Q4") == "ollama", "Ollama's models start with ollama/")
+check(api_model("groq/openai/gpt-oss-120b") == "openai/gpt-oss-120b" and api_model("ollama/qwen3:8b") == "qwen3:8b" and api_model("nvidia/a-b") == "nvidia/a-b", "api_model takes off only groq/ and ollama/")
+check(base_of("groq") == "https://api.groq.com/openai/v1" and ends(base_of("ollama"), "/v1"), "base_of: {base_of("ollama")}")
+when env("OLLAMA_HOST") == nothing { check(ollama_root() == "http://127.0.0.1:11434", "Ollama is looked for on this computer by default") }
+check(chat_model("groq/llama-3.3-70b-versatile") and not chat_model("groq/whisper-large-v3") and not chat_model("groq/meta-llama/llama-guard-4-12b") and not chat_model("groq/groq/compound"), "Groq's chat models")
+groq_ids = ["groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile", "groq/moonshotai/kimi-k2-instruct-0905", "groq/openai/gpt-oss-120b"]
+check(suggested_models("groq", groq_ids) == ["groq/openai/gpt-oss-120b", "groq/moonshotai/kimi-k2-instruct-0905"], "Groq suggestions: {suggested_models("groq", groq_ids)}")
+check(recommended("groq/openai/gpt-oss-120b") and not recommended("groq/llama-3.1-8b-instant"), "recommended Groq models")
+saved_ollama = OLLAMA_MODELS
+OLLAMA_MODELS = {"ollama/gemma2:2b": {tools: no, size: "2.6B", context: nothing}, "ollama/llama3.1:8b": {tools: yes, size: "8.0B", context: nothing}, "ollama/qwen3:8b": {tools: yes, size: "8.2B", context: nothing}, "ollama/mystery:latest": {tools: nothing, size: "", context: nothing}}
+check(suggested_models("ollama", ["ollama/gemma2:2b", "ollama/llama3.1:8b", "ollama/mystery:latest", "ollama/qwen3:8b"]) == ["ollama/qwen3:8b", "ollama/llama3.1:8b"], "Ollama suggestions: favourites that can use tools")
+check(suggested_models("ollama", ["ollama/gemma2:2b", "ollama/mystery:latest"]) == ["ollama/mystery:latest"], "a model Ollama says nothing about may still be suggested")
+check(has(ollama_note("ollama/gemma2:2b"), "can't use tools") and has(ollama_note("ollama/qwen3:8b"), "8.2B"), "Ollama notes")
+OLLAMA_MODELS = saved_ollama
+check(failure_of("error 413 from Groq: Request too large for model on tokens per minute (TPM): Limit 6000, Requested 9000", 0).final, "a request over Groq's per-minute limit won't succeed by waiting")
+check(failure_of("error 413 from Gemini: too long", 0).reason == "the conversation is too long for it", "other 413s are still too long")
+saved_keys = KEYS
+saved_settings = SETTINGS
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing, tavily: nothing}
+check(not has_key("groq") and not has_key("ollama"), "has_key with services missing from KEYS")
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing, groq: "gsk_test", ollama: "ollama", tavily: nothing}
+s = SETTINGS
+s.model_id = "groq/openai/gpt-oss-120b"
+s.fallbacks = ["ollama/qwen3:8b"]
+SETTINGS = s
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+TEST_REPLIES = {"groq/openai/gpt-oss-120b": ["FAIL error 429 from Groq (retry-after 7 s): rate limited"], "ollama/qwen3:8b": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "ollama/qwen3:8b" and rest_left("groq/openai/gpt-oss-120b") > 5, "a rate limited Groq model hands over to a local Ollama one")
+TRYING = "groq/openai/gpt-oss-120b"
+check(has(explain_problem("error 413 from Groq: Request too large for model on tokens per minute (TPM)"), "in a minute"), "Groq's per-minute limit is explained")
+TRYING = "ollama/qwen3:8b"
+check(has(explain_problem("error 404 from Ollama: model 'qwen3:8b' not found"), "ollama pull qwen3:8b"), "a model not downloaded says how to get it")
+check(has(explain_problem("couldn't reach Ollama: connection refused"), "Start the Ollama app"), "Ollama not running says what to do")
+TRYING = nothing
+KEYS = {nvidia: nothing, gemini: nothing, openrouter: nothing, groq: nothing, ollama: nothing, tavily: nothing}
+check(has(no_key_problem("ollama"), "ollama.com/download") and has(no_key_problem("groq"), "/setup"), "no key: what to do")
+TEST_REPLIES = nothing
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+KEYS = saved_keys
+SETTINGS = saved_settings
+
+# the local last resort, and local-only mode
+saved_keys = KEYS
+saved_settings = SETTINGS
+KEYS = {nvidia: "nvapi-test", gemini: "AIza-test", openrouter: nothing, groq: nothing, ollama: "ollama", tavily: nothing}
+s = SETTINGS
+s.model_id = "nvidia/main-model"
+s.fallbacks = ["gemini-3.8-flash"]
+s.local_model = "ollama/qwen3:8b"
+s.local_fallback = yes
+s.local_only = no
+SETTINGS = s
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+check(last_resort(model_chain()) == "ollama/qwen3:8b" and last_resort_label() == "ollama/qwen3:8b", "the chosen local model is the last resort")
+check(last_resort(["nvidia/main-model", "ollama/llama3.1:8b"]) == nothing, "no last resort when the chain has a local model of its own")
+# every online model fails: the local one takes over
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 401 from NVIDIA: Unauthorized"], "gemini-3.8-flash": ["FAIL error 429 from Gemini (retry-after 60 s): busy"], "ollama/qwen3:8b": [good, good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "ollama/qwen3:8b" and ACTIVE_MODEL == "ollama/qwen3:8b" and current_model() == "ollama/qwen3:8b", "when every online model fails, the local model takes over")
+# the online models are still resting: straight to the local one, without asking them
+TEST_REPLIES = {"nvidia/main-model": [], "gemini-3.8-flash": [], "ollama/qwen3:8b": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "ollama/qwen3:8b" and health_of("gemini-3.8-flash").strikes == 1, "while every online model rests, the local one answers")
+# an online model that has rested is used again
+forgive("gemini-3.8-flash")
+TEST_REPLIES = {"gemini-3.8-flash": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "gemini-3.8-flash", "back to an online model once it has rested")
+# one online model with a short wait: it is waited for, not the local model
+s.fallbacks = []
+SETTINGS = s
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 429 from NVIDIA (retry-after 1 s): busy", good], "ollama/qwen3:8b": []}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "nvidia/main-model", "a short wait for an online model is waited, not handed to the local one")
+# one online model that fails for good: the local one takes over
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 401 from NVIDIA: Unauthorized"], "ollama/qwen3:8b": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "ollama/qwen3:8b", "a single online model that fails for good hands over to the local one")
+# the local model fails too: what the online model said is what's reported
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 401 from NVIDIA: Unauthorized"], "ollama/qwen3:8b": ["FAIL couldn't reach Ollama: connection refused"]}
+said = ""
+try { nv_chat([{role: "user", content: "hi"}], no) } else problem { said = problem }
+check(has(said, "error 401 from NVIDIA"), "when the local model fails too, the online problem is kept: {said}")
+# turned off: as before
+s.local_fallback = no
+SETTINGS = s
+MODEL_HEALTH = {}
+TEST_REPLIES = {"nvidia/main-model": ["FAIL error 401 from NVIDIA: Unauthorized"], "ollama/qwen3:8b": [good]}
+said = ""
+try { nv_chat([{role: "user", content: "hi"}], no) } else problem { said = problem }
+check(has(said, "error 401") and len(TEST_REPLIES["ollama/qwen3:8b"]) == 1 and last_resort_label() == nothing, "/local fallback off: no last resort")
+# local only: the online models aren't asked at all
+s.local_fallback = yes
+s.local_only = yes
+s.fallbacks = ["gemini-3.8-flash", "ollama/llama3.1:8b"]
+SETTINGS = s
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+check(local_chain() == ["ollama/qwen3:8b", "ollama/llama3.1:8b"] and chain_in_use() == local_chain(), "the local-only chain: the local model, then local backups: {local_chain()}")
+check(last_resort(local_chain()) == nothing and current_model() == "ollama/qwen3:8b", "local only has no last resort, and the local model is in use")
+TEST_REPLIES = {"nvidia/main-model": [], "gemini-3.8-flash": [], "ollama/qwen3:8b": ["FAIL error 503 from Ollama: busy"], "ollama/llama3.1:8b": [good]}
+r = nv_chat([{role: "user", content: "hi"}], no)
+check(r.served_by == "ollama/llama3.1:8b" and health_of("nvidia/main-model").strikes == 0, "local only: a local backup takes over, and no online model is asked")
+switch_model("gemini-3.8-flash")
+check(SETTINGS.model_id == "nvidia/main-model" and SETTINGS.local_model == "ollama/qwen3:8b", "local only: an online model isn't switched to")
+check(compact_limit() <= floor(OLLAMA_CONTEXT * 0.6), "local only: summarised sooner")
+KEYS = {nvidia: "nvapi-test", gemini: nothing, openrouter: nothing, groq: nothing, ollama: nothing, tavily: nothing}
+said = ""
+try { nv_chat([{role: "user", content: "hi"}], no) } else problem { said = problem }
+check(has(said, "local-only mode is on"), "local only without Ollama says so: {said}")
+TEST_REPLIES = nothing
+MODEL_HEALTH = {}
+ACTIVE_MODEL = nothing
+KEYS = saved_keys
+SETTINGS = saved_settings
 
 # a command stopped by its time limit says so
 slow = "sleep 5"
